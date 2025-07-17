@@ -1,68 +1,148 @@
 from rest_framework import serializers
 from django.db import transaction
 from django.utils import timezone
-from usuarios.models import Usuario, Empleado_fdw, Permission, Roles
-from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from .models import Usuario, Empleado_fdw, Permission, Roles, AuditLog, crear_log_auditoria
+import re
 
-User = get_user_model()
 
+def get_client_ip(request):
+    """Obtener IP del cliente"""
+    if not request:
+        return None
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
+
+
+def get_user_agent(request):
+    """Obtener User Agent del cliente"""
+    return request.META.get('HTTP_USER_AGENT', '') if request else ''
+
+
+# ========== SERIALIZERS DE AUDITORÍA ==========
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    usuario_nombre = serializers.CharField(source='usuario.nombre_completo', read_only=True)
+    accion_display = serializers.CharField(source='get_accion_display', read_only=True)
+    fecha_hora_formateada = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            'id', 'usuario', 'usuario_nombre', 'accion', 'accion_display',
+            'accion_personalizada', 'app_label', 'model_name', 'object_id',
+            'objeto_representacion', 'detalles', 'ip_address', 'user_agent',
+            'fecha_hora', 'fecha_hora_formateada'
+        ]
+        read_only_fields = ['id', 'fecha_hora']
+
+    def get_fecha_hora_formateada(self, obj):
+        return obj.fecha_hora.strftime('%d/%m/%Y %H:%M:%S')
+
+
+# ========== SERIALIZERS DE PERMISOS ==========
 
 class PermissionSerializer(serializers.ModelSerializer):
     esta_en_uso = serializers.SerializerMethodField()
+    creado_por_nombre = serializers.CharField(source='creado_por.nombre_completo', read_only=True)
 
     class Meta:
         model = Permission
-        fields = ['id', 'recurso', 'accion', 'esta_en_uso']
+        fields = [
+            'id', 'recurso', 'accion', 'descripcion', 'activo',
+            'fecha_creacion', 'fecha_modificacion', 'creado_por',
+            'creado_por_nombre', 'esta_en_uso'
+        ]
+        read_only_fields = ['fecha_creacion', 'fecha_modificacion']
 
     def get_esta_en_uso(self, obj):
-        """Indica si el permiso está siendo usado por algún rol"""
         return obj.esta_en_uso()
 
-    def validate_accion(self, value):
-        """Validar que la acción sea una de las permitidas"""
-        acciones_validas = ['crear', 'leer', 'actualizar', 'eliminar']
-        if value not in acciones_validas:
-            raise serializers.ValidationError(
-                f"La acción debe ser una de: {', '.join(acciones_validas)}"
-            )
-        return value
-
     def validate_recurso(self, value):
-        """Validar que el recurso no esté vacío y tenga formato válido"""
         if not value or not value.strip():
             raise serializers.ValidationError("El recurso es obligatorio")
 
-        # Convertir a minúsculas y sin espacios
         value = value.strip().lower()
 
-        # Validar caracteres permitidos (solo letras, números y guiones)
-        import re
+        if len(value) < 2:
+            raise serializers.ValidationError("El recurso debe tener al menos 2 caracteres")
+        if len(value) > 50:
+            raise serializers.ValidationError("El recurso no puede tener más de 50 caracteres")
+
         if not re.match(r'^[a-z0-9-_]+$', value):
             raise serializers.ValidationError(
-                "El recurso solo puede contener letras, números, guiones y guiones bajos"
+                "El recurso solo puede contener letras minúsculas, números, guiones y guiones bajos"
             )
 
         return value
 
     def validate(self, data):
-        """Validar que la combinación recurso+acción sea única"""
         recurso = data.get('recurso')
         accion = data.get('accion')
 
-        # Verificar unicidad
-        queryset = Permission.objects.filter(recurso=recurso, accion=accion)
+        if recurso and accion:
+            queryset = Permission.objects.filter(recurso=recurso, accion=accion)
+            if self.instance:
+                queryset = queryset.exclude(pk=self.instance.pk)
 
-        # Si estamos editando, excluir el registro actual
-        if self.instance:
-            queryset = queryset.exclude(pk=self.instance.pk)
-
-        if queryset.exists():
-            raise serializers.ValidationError({
-                'non_field_errors': [f"Ya existe un permiso '{recurso}:{accion}'"]
-            })
+            if queryset.exists():
+                raise serializers.ValidationError({
+                    'non_field_errors': [f"Ya existe un permiso '{recurso}:{accion}'"]
+                })
 
         return data
 
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            validated_data['creado_por'] = request.user
+
+        permiso = super().create(validated_data)
+
+        # Log de auditoría
+        if request and request.user.is_authenticated:
+            crear_log_auditoria(
+                usuario=request.user,
+                accion='CREATE',
+                objeto=permiso,
+                detalles={'recurso': permiso.recurso, 'accion': permiso.accion},
+                ip_address=get_client_ip(request),
+                user_agent=get_user_agent(request)
+            )
+
+        return permiso
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        valores_anteriores = {
+            'recurso': instance.recurso,
+            'accion': instance.accion,
+            'activo': instance.activo
+        }
+
+        permiso = super().update(instance, validated_data)
+
+        # Log de auditoría
+        if request and request.user.is_authenticated:
+            crear_log_auditoria(
+                usuario=request.user,
+                accion='UPDATE',
+                objeto=permiso,
+                detalles={
+                    'valores_anteriores': valores_anteriores,
+                    'valores_nuevos': validated_data
+                },
+                ip_address=get_client_ip(request),
+                user_agent=get_user_agent(request)
+            )
+
+        return permiso
+
+
+# ========== SERIALIZERS DE ROLES ==========
 
 class RolesSerializer(serializers.ModelSerializer):
     permisos = PermissionSerializer(many=True, read_only=True)
@@ -72,39 +152,37 @@ class RolesSerializer(serializers.ModelSerializer):
         required=False,
         allow_empty=True
     )
-    cantidad_usuarios = serializers.SerializerMethodField()
-    cantidad_permisos = serializers.SerializerMethodField()
+    cantidad_usuarios = serializers.ReadOnlyField()
+    cantidad_permisos = serializers.ReadOnlyField()
     puede_eliminar = serializers.SerializerMethodField()
+    creado_por_nombre = serializers.CharField(source='creado_por.nombre_completo', read_only=True)
 
     class Meta:
         model = Roles
         fields = [
-            'id', 'nombre', 'activo', 'fecha_creacion',
-            'permisos', 'permisos_ids', 'cantidad_usuarios',
-            'cantidad_permisos', 'puede_eliminar'
+            'id', 'nombre', 'descripcion', 'activo', 'es_sistema',
+            'fecha_creacion', 'fecha_modificacion', 'creado_por',
+            'creado_por_nombre', 'permisos', 'permisos_ids',
+            'cantidad_usuarios', 'cantidad_permisos', 'puede_eliminar'
         ]
-        read_only_fields = ['fecha_creacion']
-
-    def get_cantidad_usuarios(self, obj):
-        return obj.cantidad_usuarios()
-
-    def get_cantidad_permisos(self, obj):
-        return obj.cantidad_permisos()
+        read_only_fields = ['fecha_creacion', 'fecha_modificacion', 'es_sistema']
 
     def get_puede_eliminar(self, obj):
         return obj.puede_eliminar()
 
     def validate_nombre(self, value):
-        """Validar que el nombre del rol sea único y válido"""
         if not value or not value.strip():
             raise serializers.ValidationError("El nombre del rol es obligatorio")
 
         value = value.strip()
 
+        if len(value) < 2:
+            raise serializers.ValidationError("El nombre debe tener al menos 2 caracteres")
+        if len(value) > 50:
+            raise serializers.ValidationError("El nombre no puede tener más de 50 caracteres")
+
         # Verificar unicidad
         queryset = Roles.objects.filter(nombre__iexact=value)
-
-        # Si estamos editando, excluir el registro actual
         if self.instance:
             queryset = queryset.exclude(pk=self.instance.pk)
 
@@ -114,24 +192,31 @@ class RolesSerializer(serializers.ModelSerializer):
         return value
 
     def validate_permisos_ids(self, value):
-        """Validar que todos los IDs de permisos existan"""
         if not value:
             return value
 
-        permisos_existentes = Permission.objects.filter(id__in=value)
+        permisos_existentes = Permission.objects.filter(
+            id__in=value,
+            activo=True,
+            eliminado=False
+        )
         ids_encontrados = set(permisos_existentes.values_list('id', flat=True))
         ids_solicitados = set(value)
 
         ids_no_encontrados = ids_solicitados - ids_encontrados
         if ids_no_encontrados:
             raise serializers.ValidationError(
-                f"Los siguientes IDs de permisos no existen: {list(ids_no_encontrados)}"
+                f"Los siguientes IDs de permisos no existen o no están activos: {list(ids_no_encontrados)}"
             )
 
         return value
 
     def create(self, validated_data):
         permisos_ids = validated_data.pop('permisos_ids', [])
+        request = self.context.get('request')
+
+        if request and request.user.is_authenticated:
+            validated_data['creado_por'] = request.user
 
         with transaction.atomic():
             rol = Roles.objects.create(**validated_data)
@@ -140,30 +225,55 @@ class RolesSerializer(serializers.ModelSerializer):
                 permisos = Permission.objects.filter(id__in=permisos_ids)
                 rol.permisos.set(permisos)
 
+            # Log de auditoría
+            if request and request.user.is_authenticated:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='CREATE',
+                    objeto=rol,
+                    detalles={'nombre': rol.nombre, 'permisos_asignados': permisos_ids},
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+
             return rol
 
     def update(self, instance, validated_data):
         permisos_ids = validated_data.pop('permisos_ids', None)
+        request = self.context.get('request')
 
         with transaction.atomic():
-            # Actualizar campos del rol
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()
 
-            # Actualizar permisos si se proporcionaron
             if permisos_ids is not None:
                 permisos = Permission.objects.filter(id__in=permisos_ids)
                 instance.permisos.set(permisos)
 
+            # Log de auditoría
+            if request and request.user.is_authenticated:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='UPDATE',
+                    objeto=instance,
+                    detalles={'permisos_nuevos': permisos_ids},
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+
             return instance
 
 
+# ========== SERIALIZERS DE USUARIOS ==========
+
 class UsuarioListSerializer(serializers.ModelSerializer):
-    """Serializer para listado de usuarios (datos básicos)"""
     rol_nombre = serializers.CharField(source='rol.nombre', read_only=True)
-    nombre_completo = serializers.SerializerMethodField()
+    nombre_completo = serializers.ReadOnlyField()
     tipo_usuario = serializers.SerializerMethodField()
+    estado_password = serializers.SerializerMethodField()
+    esta_bloqueado = serializers.ReadOnlyField()
+    creado_por_nombre = serializers.CharField(source='creado_por.nombre_completo', read_only=True)
 
     class Meta:
         model = Usuario
@@ -171,103 +281,179 @@ class UsuarioListSerializer(serializers.ModelSerializer):
             'id', 'codigocotel', 'nombre_completo', 'nombres',
             'apellidopaterno', 'apellidomaterno', 'estadoempleado',
             'fechaingreso', 'fecha_creacion', 'is_active',
-            'password_changed', 'rol_nombre', 'tipo_usuario'
+            'password_changed', 'password_reset_required', 'rol_nombre',
+            'tipo_usuario', 'estado_password', 'esta_bloqueado',
+            'creado_por_nombre', 'last_login', 'intentos_login_fallidos'
         ]
 
-    def get_nombre_completo(self, obj):
-        return obj.nombre_completo()
-
     def get_tipo_usuario(self, obj):
-        return 'manual' if obj.es_usuario_manual() else 'migrado'
+        return 'manual' if obj.es_usuario_manual else 'migrado'
+
+    def get_estado_password(self, obj):
+        if obj.password_reset_required:
+            return 'reset_requerido'
+        elif not obj.password_changed:
+            return 'cambio_requerido'
+        else:
+            return 'ok'
+
+
+class UsuarioDetailSerializer(UsuarioListSerializer):
+    permisos = serializers.SerializerMethodField()
+
+    class Meta(UsuarioListSerializer.Meta):
+        fields = UsuarioListSerializer.Meta.fields + [
+            'permisos', 'ultimo_login_ip', 'password_reset_date', 'bloqueado_hasta'
+        ]
+
+    def get_permisos(self, obj):
+        if obj.rol:
+            return list(obj.rol.permisos.filter(
+                activo=True,
+                eliminado=False
+            ).values('id', 'recurso', 'accion', 'descripcion'))
+        return []
 
 
 class UsuarioManualSerializer(serializers.ModelSerializer):
-    """Serializer para crear/editar usuarios manuales"""
-    codigocotel = serializers.IntegerField(read_only=True)  # Auto-generado
+    codigocotel = serializers.IntegerField(read_only=True)
     rol_nombre = serializers.CharField(source='rol.nombre', read_only=True)
+    nombre_completo = serializers.ReadOnlyField()
 
     class Meta:
         model = Usuario
         fields = [
             'id', 'codigocotel', 'nombres', 'apellidopaterno',
-            'apellidomaterno', 'rol', 'rol_nombre', 'is_active',
-            'password_changed', 'fecha_creacion', 'creado_por'
+            'apellidomaterno', 'rol', 'rol_nombre', 'nombre_completo',
+            'is_active', 'password_changed', 'password_reset_required',
+            'fecha_creacion', 'creado_por'
         ]
         read_only_fields = [
-            'codigocotel', 'fecha_creacion', 'creado_por', 'password_changed'
+            'codigocotel', 'fecha_creacion', 'creado_por',
+            'password_changed', 'password_reset_required'
         ]
 
     def validate_nombres(self, value):
-        """Validar nombres obligatorios"""
         if not value or not value.strip():
             raise serializers.ValidationError("Los nombres son obligatorios")
-        return value.strip()
+
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError("Los nombres deben tener al menos 2 caracteres")
+
+        if not re.match(r'^[a-zA-ZáéíóúÁÉÍÓÚñÑ\s\-\'\.]+$', value):
+            raise serializers.ValidationError(
+                "Los nombres solo pueden contener letras, espacios, guiones, apostrofes y puntos"
+            )
+
+        return value
 
     def validate_apellidopaterno(self, value):
-        """Validar apellido paterno obligatorio"""
         if not value or not value.strip():
             raise serializers.ValidationError("El apellido paterno es obligatorio")
-        return value.strip()
+
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError("El apellido paterno debe tener al menos 2 caracteres")
+
+        if not re.match(r'^[a-zA-ZáéíóúÁÉÍÓÚñÑ\s\-\'\.]+$', value):
+            raise serializers.ValidationError(
+                "El apellido paterno solo puede contener letras, espacios, guiones, apostrofes y puntos"
+            )
+
+        return value
 
     def validate_apellidomaterno(self, value):
-        """Validar apellido materno obligatorio"""
         if not value or not value.strip():
             raise serializers.ValidationError("El apellido materno es obligatorio")
-        return value.strip()
+
+        value = value.strip()
+        if len(value) < 2:
+            raise serializers.ValidationError("El apellido materno debe tener al menos 2 caracteres")
+
+        if not re.match(r'^[a-zA-ZáéíóúÁÉÍÓÚñÑ\s\-\'\.]+$', value):
+            raise serializers.ValidationError(
+                "El apellido materno solo puede contener letras, espacios, guiones, apostrofes y puntos"
+            )
+
+        return value
 
     def validate_rol(self, value):
-        """Validar que el rol exista y esté activo"""
         if not value:
             raise serializers.ValidationError("El rol es obligatorio")
 
-        if not value.activo:
+        if not value.activo or value.eliminado:
             raise serializers.ValidationError("El rol seleccionado no está activo")
 
         return value
 
     def create(self, validated_data):
-        """Crear usuario manual con código COTEL auto-generado"""
+        request = self.context.get('request')
+
         with transaction.atomic():
-            # Generar código COTEL único
             codigocotel = Usuario.objects.generar_codigo_cotel_disponible()
 
-            # Obtener usuario que está creando (del contexto)
-            request = self.context.get('request')
-            creado_por = request.user if request and request.user.is_authenticated else None
-
-            # Crear usuario manual
             usuario = Usuario.objects.create(
                 codigocotel=codigocotel,
-                persona=None,  # Usuarios manuales no tienen persona
+                persona=None,
                 apellidopaterno=validated_data['apellidopaterno'],
                 apellidomaterno=validated_data['apellidomaterno'],
                 nombres=validated_data['nombres'],
-                estadoempleado=0,  # Activo por defecto
+                estadoempleado=0,
                 fechaingreso=timezone.now().date(),
                 rol=validated_data['rol'],
-                password_changed=False,  # Forzar cambio de contraseña
-                creado_por=creado_por
+                password_changed=False,
+                password_reset_required=False,
+                creado_por=request.user if request and request.user.is_authenticated else None
             )
 
-            # Establecer contraseña inicial = código COTEL
             usuario.set_password(str(codigocotel))
             usuario.save()
+
+            # Log de auditoría
+            if request and request.user.is_authenticated:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='CREATE',
+                    objeto=usuario,
+                    detalles={
+                        'tipo': 'manual',
+                        'codigocotel': codigocotel,
+                        'rol': validated_data['rol'].nombre
+                    },
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
 
             return usuario
 
     def update(self, instance, validated_data):
-        # Actualizar campos permitidos
+        request = self.context.get('request')
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-
         instance.save()
+
+        # Log de auditoría
+        if request and request.user.is_authenticated:
+            crear_log_auditoria(
+                usuario=request.user,
+                accion='UPDATE',
+                objeto=instance,
+                detalles=validated_data,
+                ip_address=get_client_ip(request),
+                user_agent=get_user_agent(request)
+            )
+
         return instance
 
 
+# ========== SERIALIZERS DE EMPLEADOS FDW ==========
+
 class EmpleadoDisponibleSerializer(serializers.ModelSerializer):
-    """Serializer para empleados FDW disponibles para migración"""
-    nombre_completo = serializers.SerializerMethodField()
-    puede_migrar = serializers.SerializerMethodField()
+    nombre_completo = serializers.ReadOnlyField()
+    puede_migrar = serializers.ReadOnlyField()
+    esta_activo = serializers.ReadOnlyField()
     estado_texto = serializers.SerializerMethodField()
 
     class Meta:
@@ -275,33 +461,25 @@ class EmpleadoDisponibleSerializer(serializers.ModelSerializer):
         fields = [
             'persona', 'codigocotel', 'nombres', 'apellidopaterno',
             'apellidomaterno', 'nombre_completo', 'estadoempleado',
-            'estado_texto', 'fechaingreso', 'puede_migrar'
+            'estado_texto', 'fechaingreso', 'puede_migrar', 'esta_activo'
         ]
 
-    def get_nombre_completo(self, obj):
-        return obj.nombre_completo()
-
-    def get_puede_migrar(self, obj):
-        return obj.puede_migrar()
-
     def get_estado_texto(self, obj):
-        return 'Activo' if obj.esta_activo() else 'Inactivo'
+        return 'Activo' if obj.esta_activo else 'Inactivo'
 
 
 class MigrarEmpleadoSerializer(serializers.Serializer):
-    """Serializer para migrar empleado desde lista FDW"""
     empleado_persona = serializers.IntegerField()
     rol_id = serializers.IntegerField()
 
     def validate_empleado_persona(self, value):
-        """Validar que el empleado exista y pueda ser migrado"""
         try:
             empleado = Empleado_fdw.objects.get(persona=value)
         except Empleado_fdw.DoesNotExist:
             raise serializers.ValidationError("El empleado no existe")
 
-        if not empleado.puede_migrar():
-            if empleado.esta_migrado():
+        if not empleado.puede_migrar:
+            if empleado.esta_migrado:
                 raise serializers.ValidationError("El empleado ya está migrado")
             else:
                 raise serializers.ValidationError("El empleado no está activo")
@@ -309,36 +487,28 @@ class MigrarEmpleadoSerializer(serializers.Serializer):
         return value
 
     def validate_rol_id(self, value):
-        """Validar que el rol exista y esté activo"""
         try:
             rol = Roles.objects.get(id=value)
         except Roles.DoesNotExist:
             raise serializers.ValidationError("El rol no existe")
 
-        if not rol.activo:
+        if not rol.activo or rol.eliminado:
             raise serializers.ValidationError("El rol no está activo")
 
         return value
 
     def create(self, validated_data):
-        """Migrar empleado FDW a tabla Usuario"""
         empleado_persona = validated_data['empleado_persona']
         rol_id = validated_data['rol_id']
+        request = self.context.get('request')
 
         with transaction.atomic():
-            # Obtener empleado FDW
             empleado = Empleado_fdw.objects.get(persona=empleado_persona)
             rol = Roles.objects.get(id=rol_id)
 
-            # Verificar nuevamente que puede migrar (por concurrencia)
-            if not empleado.puede_migrar():
+            if not empleado.puede_migrar:
                 raise serializers.ValidationError("El empleado ya no puede ser migrado")
 
-            # Obtener usuario que está migrando
-            request = self.context.get('request')
-            creado_por = request.user if request and request.user.is_authenticated else None
-
-            # Crear usuario migrado
             usuario = Usuario.objects.create(
                 codigocotel=empleado.codigocotel,
                 persona=empleado.persona,
@@ -348,30 +518,127 @@ class MigrarEmpleadoSerializer(serializers.Serializer):
                 estadoempleado=empleado.estadoempleado,
                 fechaingreso=empleado.fechaingreso,
                 rol=rol,
-                password_changed=False,  # Forzar cambio de contraseña
-                creado_por=creado_por
+                password_changed=False,
+                password_reset_required=False,
+                creado_por=request.user if request and request.user.is_authenticated else None
             )
 
-            # Establecer contraseña inicial = código COTEL
             usuario.set_password(str(empleado.codigocotel))
             usuario.save()
+
+            # Log de auditoría
+            if request and request.user.is_authenticated:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='MIGRATE_USER',
+                    objeto=usuario,
+                    detalles={
+                        'tipo': 'migrado',
+                        'empleado_persona': empleado_persona,
+                        'rol': rol.nombre
+                    },
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
 
             return usuario
 
 
-# Mantener serializers existentes
+# ========== SERIALIZERS DE CONTRASEÑAS ==========
+
+class ResetPasswordSerializer(serializers.Serializer):
+    usuario_id = serializers.IntegerField()
+    motivo = serializers.CharField(max_length=200, required=False, allow_blank=True)
+
+    def validate_usuario_id(self, value):
+        try:
+            usuario = Usuario.objects.get(id=value)
+        except Usuario.DoesNotExist:
+            raise serializers.ValidationError("El usuario no existe")
+
+        if usuario.is_superuser:
+            raise serializers.ValidationError("No se puede resetear la contraseña de un superusuario")
+
+        if usuario.eliminado:
+            raise serializers.ValidationError("No se puede resetear la contraseña de un usuario eliminado")
+
+        return value
+
+    def save(self):
+        usuario_id = self.validated_data['usuario_id']
+        motivo = self.validated_data.get('motivo', '')
+        request = self.context.get('request')
+
+        with transaction.atomic():
+            usuario = Usuario.objects.get(id=usuario_id)
+            usuario.resetear_password(
+                admin_user=request.user if request and request.user.is_authenticated else None
+            )
+
+            # Log de auditoría
+            if request and request.user.is_authenticated:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='RESET_PASSWORD',
+                    objeto=usuario,
+                    detalles={'motivo': motivo},
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+
+            return usuario
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, min_length=8)
+    confirm_password = serializers.CharField(required=True)
+
+    def validate_new_password(self, value):
+        try:
+            validate_password(value)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError("Las contraseñas no coinciden")
+        return data
+
+    def save(self, user):
+        request = self.context.get('request')
+
+        with transaction.atomic():
+            user.set_password(self.validated_data['new_password'])
+            user.password_changed = True
+            user.password_reset_required = False
+            user.reset_intentos_fallidos()
+            user.save()
+
+            # Log de auditoría
+            if request:
+                crear_log_auditoria(
+                    usuario=user,
+                    accion='CHANGE_PASSWORD',
+                    objeto=user,
+                    detalles={'cambio_exitoso': True},
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+
+        return user
+
+
+# ========== SERIALIZERS LEGACY (COMPATIBILIDAD) ==========
+
 class UsuarioSerializer(serializers.ModelSerializer):
     class Meta:
         model = Usuario
         fields = [
-            'codigocotel',
-            'persona',
-            'apellidopaterno',
-            'apellidomaterno',
-            'nombres',
-            'estadoempleado',
-            'fechaingreso',
-            'password'
+            'codigocotel', 'persona', 'apellidopaterno',
+            'apellidomaterno', 'nombres', 'estadoempleado',
+            'fechaingreso', 'password'
         ]
         extra_kwargs = {
             'password': {'write_only': True}
@@ -390,16 +657,7 @@ class EmpleadoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Empleado_fdw
         fields = [
-            'persona',
-            'apellidopaterno',
-            'apellidomaterno',
-            'nombres',
-            'estadoempleado',
-            'codigocotel',
+            'persona', 'apellidopaterno', 'apellidomaterno',
+            'nombres', 'estadoempleado', 'codigocotel',
             'fechaingreso'
         ]
-
-
-class ChangePasswordSerializer(serializers.Serializer):
-    old_password = serializers.CharField(required=True)
-    new_password = serializers.CharField(required=True, min_length=8)
