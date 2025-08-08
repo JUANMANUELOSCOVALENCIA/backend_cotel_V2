@@ -163,25 +163,57 @@ class AuditLog(models.Model):
 
 def crear_log_auditoria(usuario, accion, objeto, detalles=None, ip_address=None,
                         user_agent=None, accion_personalizada=None):
-    """Función universal para crear logs de auditoría"""
+    """Función universal para crear logs de auditoría con validación JSON"""
     if not usuario or not objeto:
         return None
 
-    content_type = ContentType.objects.get_for_model(objeto)
+    try:
+        content_type = ContentType.objects.get_for_model(objeto)
 
-    return AuditLog.objects.create(
-        usuario=usuario,
-        accion=accion,
-        accion_personalizada=accion_personalizada or '',
-        content_type=content_type,
-        object_id=str(objeto.pk),
-        objeto_representacion=str(objeto)[:200],
-        app_label=content_type.app_label,
-        model_name=content_type.model,
-        detalles=detalles or {},
-        ip_address=ip_address,
-        user_agent=user_agent
-    )
+        # Función para hacer los datos serializables para JSON
+        def make_json_serializable(data):
+            if data is None:
+                return None
+
+            if isinstance(data, dict):
+                return {k: make_json_serializable(v) for k, v in data.items()}
+            elif isinstance(data, (list, tuple)):
+                return [make_json_serializable(item) for item in data]
+            elif hasattr(data, 'id') and hasattr(data, '__class__'):
+                # Es un modelo de Django, convertir a diccionario simple
+                return {
+                    'id': data.id,
+                    'class': data.__class__.__name__,
+                    'str': str(data)[:100]  # Limitar longitud
+                }
+            elif isinstance(data, (str, int, float, bool)):
+                return data
+            else:
+                # Para otros tipos, convertir a string
+                return str(data)[:200]  # Limitar longitud
+
+        # Limpiar detalles para que sean JSON serializables
+        detalles_limpios = make_json_serializable(detalles or {})
+
+        return AuditLog.objects.create(
+            usuario=usuario,
+            accion=accion,
+            accion_personalizada=accion_personalizada or '',
+            content_type=content_type,
+            object_id=str(objeto.pk),
+            objeto_representacion=str(objeto)[:200],
+            app_label=content_type.app_label,
+            model_name=content_type.model,
+            detalles=detalles_limpios,
+            ip_address=ip_address,
+            user_agent=user_agent[:500] if user_agent else None  # Limitar user_agent
+        )
+    except Exception as e:
+        # Si falla la auditoría, imprimir error pero no fallar la operación principal
+        print(f"Error creando log de auditoría: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # ========== MANAGER OPTIMIZADO PARA USUARIOS ==========
@@ -356,8 +388,11 @@ class Roles(SoftDeleteModel):
         return self.permisos.filter(activo=True, eliminado=False).count()
 
     def puede_eliminar(self):
-        return not self.es_sistema and not self.usuario_set.activos().exists()
-
+        return not self.es_sistema and not Usuario.objects.filter(
+            rol=self,
+            is_active=True,
+            eliminado=False
+        ).exists()
 
 # ========== MODELO DE USUARIO ==========
 
@@ -517,7 +552,19 @@ class Usuario(AbstractBaseUser, PermissionsMixin, SoftDeleteModel):
 
     def puede_eliminar(self):
         """Verifica si puede ser eliminado"""
-        return not self.is_superuser and not self.usuarios_creados.activos().exists()
+        # No permitir eliminar superusuarios
+        if self.is_superuser:
+            return False
+
+        # Verificar si tiene usuarios creados activos
+        # Usar filter en lugar del manager personalizado
+        usuarios_creados_activos = Usuario.objects.filter(
+            creado_por=self,
+            is_active=True,
+            eliminado=False
+        ).exists()
+
+        return not usuarios_creados_activos
 
 
 # ========== MODELO FDW ==========

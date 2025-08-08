@@ -668,10 +668,30 @@ class UsuarioViewSet(ModelViewSet):
         return UsuarioManualSerializer
 
     def destroy(self, request, *args, **kwargs):
-        """Soft delete para usuarios"""
-        usuario = self.get_object()
+        """Soft delete para usuarios con validaciones mejoradas"""
+        try:
+            usuario = self.get_object()
 
-        if usuario.puede_eliminar():
+            # Verificar que no sea el mismo usuario que está logueado
+            if usuario.id == request.user.id:
+                return Response(
+                    {"error": "No puedes eliminar tu propio usuario"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Verificar si puede ser eliminado
+            if not usuario.puede_eliminar():
+                if usuario.is_superuser:
+                    mensaje = "No se puede eliminar un superusuario"
+                else:
+                    mensaje = "No se puede eliminar este usuario porque tiene usuarios creados activos"
+
+                return Response(
+                    {"error": mensaje},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Realizar soft delete
             usuario.delete(user=request.user)
 
             # Log de auditoría
@@ -679,7 +699,11 @@ class UsuarioViewSet(ModelViewSet):
                 usuario=request.user,
                 accion='DELETE',
                 objeto=usuario,
-                detalles={'tipo_eliminacion': 'soft_delete'},
+                detalles={
+                    'tipo_eliminacion': 'soft_delete',
+                    'nombre_completo': usuario.nombre_completo,
+                    'codigocotel': usuario.codigocotel
+                },
                 ip_address=get_client_ip(request),
                 user_agent=get_user_agent(request)
             )
@@ -688,10 +712,15 @@ class UsuarioViewSet(ModelViewSet):
                 {"message": f"Usuario {usuario.nombre_completo} eliminado correctamente"},
                 status=status.HTTP_200_OK
             )
-        else:
+
+        except Exception as e:
+            print(f"Error en destroy de usuario: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
             return Response(
-                {"error": "No se puede eliminar este usuario"},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': f'Error al eliminar usuario: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     @action(detail=True, methods=['post'])
@@ -892,6 +921,39 @@ class UsuarioViewSet(ModelViewSet):
             {"message": f"Usuario {usuario.nombre_completo} desbloqueado correctamente"},
             status=status.HTTP_200_OK
         )
+
+    @action(detail=False, methods=['get'])
+    def eliminados(self, request):
+        """Listar usuarios eliminados (soft delete)"""
+        try:
+            # Obtener usuarios eliminados
+            usuarios_eliminados = Usuario.objects.deleted_only().select_related('rol', 'eliminado_por')
+
+            # Aplicar filtros si los hay
+            search = request.query_params.get('search', None)
+            if search:
+                usuarios_eliminados = usuarios_eliminados.filter(
+                    Q(nombres__icontains=search) |
+                    Q(apellidopaterno__icontains=search) |
+                    Q(apellidomaterno__icontains=search) |
+                    Q(codigocotel__icontains=search)
+                )
+
+            # Paginación
+            page = self.paginate_queryset(usuarios_eliminados)
+            if page is not None:
+                serializer = UsuarioListSerializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
+            serializer = UsuarioListSerializer(usuarios_eliminados, many=True)
+            return Response(serializer.data)
+
+        except Exception as e:
+            print(f"Error obteniendo usuarios eliminados: {str(e)}")
+            return Response(
+                {'error': 'Error al obtener usuarios eliminados'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class EmpleadosDisponiblesViewSet(ModelViewSet):

@@ -430,20 +430,55 @@ class UsuarioManualSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         request = self.context.get('request')
 
+        # Guardar valores anteriores para auditoría
+        valores_anteriores = {}
+        for field in validated_data.keys():
+            if hasattr(instance, field):
+                old_value = getattr(instance, field)
+                if field == 'rol' and old_value:
+                    # Serializar el rol anterior como diccionario
+                    valores_anteriores[field] = {
+                        'id': old_value.id,
+                        'nombre': old_value.nombre
+                    }
+                else:
+                    valores_anteriores[field] = old_value
+
+        # Preparar valores nuevos para auditoría
+        valores_nuevos = {}
+        for field, value in validated_data.items():
+            if field == 'rol' and value:
+                # Serializar el rol nuevo como diccionario
+                valores_nuevos[field] = {
+                    'id': value.id,
+                    'nombre': value.nombre
+                }
+            else:
+                valores_nuevos[field] = value
+
+        # Actualizar la instancia
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
 
-        # Log de auditoría
+        # Log de auditoría con datos serializables
         if request and request.user.is_authenticated:
-            crear_log_auditoria(
-                usuario=request.user,
-                accion='UPDATE',
-                objeto=instance,
-                detalles=validated_data,
-                ip_address=get_client_ip(request),
-                user_agent=get_user_agent(request)
-            )
+            try:
+                crear_log_auditoria(
+                    usuario=request.user,
+                    accion='UPDATE',
+                    objeto=instance,
+                    detalles={
+                        'valores_anteriores': valores_anteriores,
+                        'valores_nuevos': valores_nuevos,
+                        'campos_actualizados': list(validated_data.keys())
+                    },
+                    ip_address=get_client_ip(request),
+                    user_agent=get_user_agent(request)
+                )
+            except Exception as e:
+                # Si hay error en auditoría, solo loggearlo pero no fallar
+                print(f"Error en log de auditoría: {str(e)}")
 
         return instance
 
