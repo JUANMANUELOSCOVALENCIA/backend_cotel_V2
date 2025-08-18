@@ -245,36 +245,50 @@ class UsuarioQuerySet(models.QuerySet):
         """Usuarios que necesitan cambiar contraseña"""
         return self.filter(Q(password_changed=False) | Q(password_reset_required=True))
 
+    def eliminados(self):
+        """Solo usuarios eliminados"""
+        return self.filter(eliminado=True)
+
+    def no_eliminados(self):
+        """Solo usuarios no eliminados"""
+        return self.filter(eliminado=False)
+
 
 class UsuarioManager(BaseUserManager):
-    """Manager optimizado para Usuario"""
+    """Manager optimizado para Usuario - CORREGIDO"""
 
     def get_queryset(self):
+        """Por defecto, excluir usuarios eliminados"""
         return UsuarioQuerySet(self.model, using=self._db).filter(eliminado=False)
 
+    # MÉTODOS CLAVE PARA ELIMINADOS
     def with_deleted(self):
         """Incluir usuarios eliminados"""
         return UsuarioQuerySet(self.model, using=self._db)
 
+    def deleted_only(self):
+        """Solo usuarios eliminados - ESTE ES EL QUE FALTABA"""
+        return UsuarioQuerySet(self.model, using=self._db).filter(eliminado=True)
+
+    def all_objects(self):
+        """Alias para with_deleted()"""
+        return self.with_deleted()
+
+    # Resto de métodos existentes...
     def create_user(self, codigocotel, password=None, **extra_fields):
-        """Crear usuario normal"""
         if not codigocotel:
             raise ValueError('El código COTEL es obligatorio')
-
         user = self.model(codigocotel=codigocotel, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
 
     def create_superuser(self, codigocotel, password=None, **extra_fields):
-        """Crear superusuario"""
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-
         return self.create_user(codigocotel, password, **extra_fields)
 
     def generar_codigo_cotel_disponible(self):
-        """Genera código COTEL >= 9000 disponible"""
         ultimo_codigo = self.with_deleted().filter(
             codigocotel__gte=9000
         ).aggregate(Max('codigocotel'))['codigocotel__max']
@@ -282,20 +296,32 @@ class UsuarioManager(BaseUserManager):
         codigo_candidato = max(9000, (ultimo_codigo or 8999) + 1)
 
         while True:
-            # Verificar Usuario
             if self.with_deleted().filter(codigocotel=codigo_candidato).exists():
                 codigo_candidato += 1
                 continue
-
-            # Verificar FDW
             try:
                 if Empleado_fdw.objects.filter(codigocotel=codigo_candidato).exists():
                     codigo_candidato += 1
                     continue
             except:
                 pass
-
             return codigo_candidato
+
+    # Métodos de conveniencia
+    def activos(self):
+        return self.get_queryset().activos()
+
+    def manuales(self):
+        return self.get_queryset().manuales()
+
+    def migrados(self):
+        return self.get_queryset().migrados()
+
+    def bloqueados(self):
+        return self.get_queryset().bloqueados()
+
+    def password_pendiente(self):
+        return self.get_queryset().password_pendiente()
 
 
 # ========== MODELO DE PERMISOS ==========

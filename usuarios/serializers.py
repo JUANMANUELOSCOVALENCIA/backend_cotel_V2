@@ -28,6 +28,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.CharField(source='usuario.nombre_completo', read_only=True)
     accion_display = serializers.CharField(source='get_accion_display', read_only=True)
     fecha_hora_formateada = serializers.SerializerMethodField()
+    es_eliminacion = serializers.SerializerMethodField()  # NUEVO
+    es_restauracion = serializers.SerializerMethodField()  # NUEVO
 
     class Meta:
         model = AuditLog
@@ -35,12 +37,20 @@ class AuditLogSerializer(serializers.ModelSerializer):
             'id', 'usuario', 'usuario_nombre', 'accion', 'accion_display',
             'accion_personalizada', 'app_label', 'model_name', 'object_id',
             'objeto_representacion', 'detalles', 'ip_address', 'user_agent',
-            'fecha_hora', 'fecha_hora_formateada'
+            'fecha_hora', 'fecha_hora_formateada', 'es_eliminacion', 'es_restauracion'
         ]
         read_only_fields = ['id', 'fecha_hora']
 
     def get_fecha_hora_formateada(self, obj):
         return obj.fecha_hora.strftime('%d/%m/%Y %H:%M:%S')
+
+    def get_es_eliminacion(self, obj):
+        """Identificar si es una acción de eliminación"""
+        return obj.accion == 'DELETE'
+
+    def get_es_restauracion(self, obj):
+        """Identificar si es una acción de restauración"""
+        return obj.accion == 'RESTORE'
 
 
 # ========== SERIALIZERS DE PERMISOS ==========
@@ -274,6 +284,9 @@ class UsuarioListSerializer(serializers.ModelSerializer):
     estado_password = serializers.SerializerMethodField()
     esta_bloqueado = serializers.ReadOnlyField()
     creado_por_nombre = serializers.CharField(source='creado_por.nombre_completo', read_only=True)
+    eliminado = serializers.BooleanField(read_only=True)
+    fecha_eliminacion = serializers.DateTimeField(read_only=True)
+    eliminado_por_nombre = serializers.CharField(source='eliminado_por.nombre_completo', read_only=True)
 
     class Meta:
         model = Usuario
@@ -283,7 +296,8 @@ class UsuarioListSerializer(serializers.ModelSerializer):
             'fechaingreso', 'fecha_creacion', 'is_active',
             'password_changed', 'password_reset_required', 'rol_nombre',
             'tipo_usuario', 'estado_password', 'esta_bloqueado',
-            'creado_por_nombre', 'last_login', 'intentos_login_fallidos'
+            'creado_por_nombre', 'last_login', 'intentos_login_fallidos',
+            'eliminado', 'fecha_eliminacion', 'eliminado_por_nombre'
         ]
 
     def get_tipo_usuario(self, obj):
@@ -296,7 +310,6 @@ class UsuarioListSerializer(serializers.ModelSerializer):
             return 'cambio_requerido'
         else:
             return 'ok'
-
 
 class UsuarioDetailSerializer(UsuarioListSerializer):
     permisos = serializers.SerializerMethodField()
@@ -314,6 +327,77 @@ class UsuarioDetailSerializer(UsuarioListSerializer):
             ).values('id', 'recurso', 'accion', 'descripcion'))
         return []
 
+class UsuarioEliminadoSerializer(UsuarioListSerializer):
+    """Serializer específico para usuarios eliminados con información adicional"""
+
+    motivo_eliminacion = serializers.SerializerMethodField()
+    puede_restaurar = serializers.SerializerMethodField()
+    tiempo_eliminado = serializers.SerializerMethodField()
+
+    class Meta(UsuarioListSerializer.Meta):
+        fields = UsuarioListSerializer.Meta.fields + [
+            'motivo_eliminacion', 'puede_restaurar', 'tiempo_eliminado'
+        ]
+
+    def get_motivo_eliminacion(self, obj):
+        """Obtener motivo de eliminación desde logs de auditoría"""
+        try:
+            from .models import AuditLog
+            log = AuditLog.objects.filter(
+                content_type__model='usuario',
+                object_id=str(obj.pk),
+                accion='DELETE'
+            ).order_by('-fecha_hora').first()
+
+            if log:
+                motivo = log.detalles.get('motivo', '')
+                return motivo if motivo else 'Eliminación administrativa'
+            return 'Motivo no especificado'
+        except Exception:
+            return 'No disponible'
+
+    def get_puede_restaurar(self, obj):
+        """Verificar si el usuario puede ser restaurado"""
+        if not obj.eliminado:
+            return False
+
+        # Verificar si no hay conflictos con códigos COTEL
+        try:
+            from .models import Usuario, Empleado_fdw
+
+            # Verificar que no haya otro usuario activo con el mismo código
+            conflicto_usuario = Usuario.objects.filter(
+                codigocotel=obj.codigocotel
+            ).exclude(pk=obj.pk).exists()
+
+            if conflicto_usuario:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def get_tiempo_eliminado(self, obj):
+        """Calcular tiempo transcurrido desde la eliminación"""
+        if not obj.fecha_eliminacion:
+            return None
+
+        try:
+            from django.utils import timezone
+            delta = timezone.now() - obj.fecha_eliminacion
+
+            if delta.days > 0:
+                return f"{delta.days} días"
+            elif delta.seconds > 3600:
+                horas = delta.seconds // 3600
+                return f"{horas} horas"
+            elif delta.seconds > 60:
+                minutos = delta.seconds // 60
+                return f"{minutos} minutos"
+            else:
+                return "Hace un momento"
+        except Exception:
+            return None
 
 class UsuarioManualSerializer(serializers.ModelSerializer):
     codigocotel = serializers.IntegerField(read_only=True)
@@ -483,6 +567,8 @@ class UsuarioManualSerializer(serializers.ModelSerializer):
         return instance
 
 
+
+
 # ========== SERIALIZERS DE EMPLEADOS FDW ==========
 
 class EmpleadoDisponibleSerializer(serializers.ModelSerializer):
@@ -515,7 +601,18 @@ class MigrarEmpleadoSerializer(serializers.Serializer):
 
         if not empleado.puede_migrar:
             if empleado.esta_migrado:
-                raise serializers.ValidationError("El empleado ya está migrado")
+                # ACTUALIZADO: Verificar si el usuario migrado está eliminado
+                usuario_existente = Usuario.objects.with_deleted().filter(
+                    codigocotel=empleado.codigocotel
+                ).first()
+
+                if usuario_existente and usuario_existente.eliminado:
+                    raise serializers.ValidationError(
+                        "El empleado fue migrado previamente pero el usuario está eliminado. "
+                        "Contacte al administrador para restaurar el usuario."
+                    )
+                else:
+                    raise serializers.ValidationError("El empleado ya está migrado")
             else:
                 raise serializers.ValidationError("El empleado no está activo")
 
@@ -544,6 +641,18 @@ class MigrarEmpleadoSerializer(serializers.Serializer):
             if not empleado.puede_migrar:
                 raise serializers.ValidationError("El empleado ya no puede ser migrado")
 
+            # ACTUALIZADO: Verificar si existe usuario eliminado con mismo código
+            usuario_eliminado = Usuario.objects.with_deleted().filter(
+                codigocotel=empleado.codigocotel,
+                eliminado=True
+            ).first()
+
+            if usuario_eliminado:
+                raise serializers.ValidationError(
+                    f"Ya existe un usuario eliminado con el código COTEL {empleado.codigocotel}. "
+                    "Contacte al administrador para restaurar el usuario existente."
+                )
+
             usuario = Usuario.objects.create(
                 codigocotel=empleado.codigocotel,
                 persona=empleado.persona,
@@ -570,7 +679,11 @@ class MigrarEmpleadoSerializer(serializers.Serializer):
                     detalles={
                         'tipo': 'migrado',
                         'empleado_persona': empleado_persona,
-                        'rol': rol.nombre
+                        'rol': rol.nombre,
+                        'verificaciones': {
+                            'sin_conflictos': True,
+                            'empleado_activo': True
+                        }
                     },
                     ip_address=get_client_ip(request),
                     user_agent=get_user_agent(request)
@@ -696,3 +809,71 @@ class EmpleadoSerializer(serializers.ModelSerializer):
             'nombres', 'estadoempleado', 'codigocotel',
             'fechaingreso'
         ]
+
+        class EstadisticasUsuariosSerializer(serializers.Serializer):
+            """Serializer para estadísticas completas del sistema"""
+
+            total_usuarios = serializers.IntegerField()
+            usuarios_activos = serializers.IntegerField()
+            usuarios_inactivos = serializers.IntegerField()
+            usuarios_eliminados = serializers.IntegerField()  # NUEVO
+            usuarios_manuales = serializers.IntegerField()
+            usuarios_migrados = serializers.IntegerField()
+            usuarios_bloqueados = serializers.IntegerField()
+            usuarios_password_pendiente = serializers.IntegerField()
+
+            # Estadísticas de eliminados por período
+            eliminados_hoy = serializers.IntegerField()  # NUEVO
+            eliminados_semana = serializers.IntegerField()  # NUEVO
+            eliminados_mes = serializers.IntegerField()  # NUEVO
+
+            # Top eliminadores
+            top_eliminadores = serializers.ListField(  # NUEVO
+                child=serializers.DictField(),
+                allow_empty=True
+            )
+
+            class OperacionMasivaEliminadosSerializer(serializers.Serializer):
+                """Serializer para operaciones masivas en usuarios eliminados"""
+
+                usuarios_ids = serializers.ListField(
+                    child=serializers.IntegerField(),
+                    min_length=1,
+                    max_length=100  # Limitar operaciones masivas
+                )
+                accion = serializers.ChoiceField(
+                    choices=['restaurar', 'eliminar_definitivo'],
+                    required=True
+                )
+                confirmacion = serializers.BooleanField(required=True)
+
+                def validate_confirmacion(self, value):
+                    if not value:
+                        raise serializers.ValidationError("Debe confirmar la operación")
+                    return value
+
+                def validate_usuarios_ids(self, value):
+                    # Verificar que todos los IDs correspondan a usuarios eliminados
+                    usuarios_eliminados = Usuario.objects.with_deleted().filter(
+                        id__in=value,
+                        eliminado=True
+                    )
+
+                    if usuarios_eliminados.count() != len(value):
+                        raise serializers.ValidationError(
+                            "Algunos usuarios no existen o no están eliminados"
+                        )
+
+                    return value
+
+                def validate(self, data):
+                    # Validaciones específicas por acción
+                    if data['accion'] == 'eliminar_definitivo':
+                        # Verificar permisos especiales para eliminación definitiva
+                        request = self.context.get('request')
+                        if request and not request.user.is_superuser:
+                            raise serializers.ValidationError(
+                                "Solo los superusuarios pueden realizar eliminaciones definitivas"
+                            )
+
+                    return data

@@ -635,15 +635,23 @@ class UsuarioViewSet(ModelViewSet):
     ordering = ['-fecha_creacion']
 
     def get_queryset(self):
-        """Queryset con filtros"""
-        queryset = Usuario.objects.all().select_related('rol', 'creado_por')
+        """Queryset con filtros - ACTUALIZADO para incluir eliminados"""
+        # MODIFICADO: Usar with_deleted si se solicita incluir eliminados
+        with_deleted = self.request.query_params.get('with_deleted', 'false').lower() == 'true'
+
+        if with_deleted:
+            queryset = Usuario.objects.with_deleted().select_related('rol', 'creado_por')
+        else:
+            queryset = Usuario.objects.all().select_related('rol', 'creado_por')
 
         # Filtro por tipo de usuario
         tipo = self.request.query_params.get('tipo', None)
         if tipo == 'manual':
-            queryset = queryset.manuales()
+            queryset = queryset.filter(codigocotel__gte=9000, persona__isnull=True)
         elif tipo == 'migrado':
-            queryset = queryset.migrados()
+            queryset = queryset.filter(
+                Q(codigocotel__lt=9000) | Q(persona__isnull=False)
+            )
 
         # Filtro por estado de contraseña
         password_status = self.request.query_params.get('password_status', None)
@@ -655,7 +663,7 @@ class UsuarioViewSet(ModelViewSet):
         # Filtro por usuarios bloqueados
         bloqueado = self.request.query_params.get('bloqueado', None)
         if bloqueado == 'true':
-            queryset = queryset.bloqueados()
+            queryset = queryset.filter(bloqueado_hasta__gt=timezone.now())
 
         return queryset
 
@@ -666,6 +674,48 @@ class UsuarioViewSet(ModelViewSet):
         elif self.action == 'retrieve':
             return UsuarioDetailSerializer
         return UsuarioManualSerializer
+
+    def list(self, request, *args, **kwargs):
+        """
+        ACTUALIZADO: Listar usuarios con opción de incluir eliminados
+        """
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                # NUEVO: Añadir información sobre si están eliminados
+                serializer = self.get_serializer(page, many=True)
+
+                # Enriquecer datos con información de eliminación
+                enriched_data = []
+                for item in serializer.data:
+                    # Buscar el usuario completo para verificar si está eliminado
+                    try:
+                        user = Usuario.objects.with_deleted().get(id=item['id'])
+                        item['eliminado'] = user.eliminado
+                        item[
+                            'fecha_eliminacion'] = user.fecha_eliminacion.isoformat() if user.fecha_eliminacion else None
+                        item[
+                            'eliminado_por_nombre'] = user.eliminado_por.nombre_completo if user.eliminado_por else None
+                    except Usuario.DoesNotExist:
+                        item['eliminado'] = False
+
+                    enriched_data.append(item)
+
+                # Crear respuesta paginada con datos enriquecidos
+                paginated_response = self.get_paginated_response(enriched_data)
+                return paginated_response
+
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        except Exception as e:
+            print(f"Error en list de usuarios: {str(e)}")
+            return Response(
+                {'error': 'Error al obtener usuarios'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     def destroy(self, request, *args, **kwargs):
         """Soft delete para usuarios con validaciones mejoradas"""
@@ -726,30 +776,50 @@ class UsuarioViewSet(ModelViewSet):
     @action(detail=True, methods=['post'])
     def restaurar(self, request, pk=None):
         """Restaurar usuario eliminado"""
-        usuario = get_object_or_404(Usuario.all_objects, pk=pk)
+        try:
+            # ACTUALIZADO: Buscar en usuarios eliminados específicamente
+            usuario = get_object_or_404(Usuario.objects.with_deleted(), pk=pk)
 
-        if not usuario.eliminado:
-            return Response(
-                {"error": "El usuario no está eliminado"},
-                status=status.HTTP_400_BAD_REQUEST
+            if not usuario.eliminado:
+                return Response(
+                    {"error": "El usuario no está eliminado"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Verificar permisos
+            if not request.user.tiene_permiso('usuarios', 'actualizar'):
+                return Response(
+                    {"error": "No tiene permisos para restaurar usuarios"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            usuario.restore()
+
+            # Log de auditoría
+            crear_log_auditoria(
+                usuario=request.user,
+                accion='RESTORE',
+                objeto=usuario,
+                detalles={
+                    'accion': 'restaurar_usuario',
+                    'nombre_completo': usuario.nombre_completo,
+                    'codigocotel': usuario.codigocotel
+                },
+                ip_address=get_client_ip(request),
+                user_agent=get_user_agent(request)
             )
 
-        usuario.restore()
+            return Response(
+                {"message": f"Usuario {usuario.nombre_completo} restaurado correctamente"},
+                status=status.HTTP_200_OK
+            )
 
-        # Log de auditoría
-        crear_log_auditoria(
-            usuario=request.user,
-            accion='RESTORE',
-            objeto=usuario,
-            detalles={'accion': 'restaurar'},
-            ip_address=get_client_ip(request),
-            user_agent=get_user_agent(request)
-        )
-
-        return Response(
-            {"message": f"Usuario {usuario.nombre_completo} restaurado correctamente"},
-            status=status.HTTP_200_OK
-        )
+        except Exception as e:
+            print(f"Error restaurando usuario: {str(e)}")
+            return Response(
+                {'error': f'Error al restaurar usuario: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['post'])
     def activar(self, request, pk=None):
@@ -924,7 +994,9 @@ class UsuarioViewSet(ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def eliminados(self, request):
-        """Listar usuarios eliminados (soft delete)"""
+        """
+        ACTUALIZADO: Listar usuarios eliminados (soft delete) con mejor paginación
+        """
         try:
             # Obtener usuarios eliminados
             usuarios_eliminados = Usuario.objects.deleted_only().select_related('rol', 'eliminado_por')
@@ -939,17 +1011,64 @@ class UsuarioViewSet(ModelViewSet):
                     Q(codigocotel__icontains=search)
                 )
 
+            # Filtro por rol
+            rol = request.query_params.get('rol', None)
+            if rol:
+                usuarios_eliminados = usuarios_eliminados.filter(rol_id=rol)
+
+            # Filtro por tipo
+            tipo = request.query_params.get('tipo', None)
+            if tipo == 'manual':
+                usuarios_eliminados = usuarios_eliminados.filter(codigocotel__gte=9000, persona__isnull=True)
+            elif tipo == 'migrado':
+                usuarios_eliminados = usuarios_eliminados.filter(
+                    Q(codigocotel__lt=9000) | Q(persona__isnull=False)
+                )
+
             # Paginación
             page = self.paginate_queryset(usuarios_eliminados)
             if page is not None:
                 serializer = UsuarioListSerializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
+
+                # Enriquecer datos con información de eliminación
+                enriched_data = []
+                for item in serializer.data:
+                    try:
+                        user = Usuario.objects.with_deleted().get(id=item['id'])
+                        item['eliminado'] = True  # Siempre True en esta vista
+                        item[
+                            'fecha_eliminacion'] = user.fecha_eliminacion.isoformat() if user.fecha_eliminacion else None
+                        item[
+                            'eliminado_por_nombre'] = user.eliminado_por.nombre_completo if user.eliminado_por else None
+                    except Usuario.DoesNotExist:
+                        continue
+
+                    enriched_data.append(item)
+
+                return self.get_paginated_response(enriched_data)
 
             serializer = UsuarioListSerializer(usuarios_eliminados, many=True)
-            return Response(serializer.data)
+
+            # Enriquecer datos
+            enriched_data = []
+            for item in serializer.data:
+                try:
+                    user = Usuario.objects.with_deleted().get(id=item['id'])
+                    item['eliminado'] = True
+                    item['fecha_eliminacion'] = user.fecha_eliminacion.isoformat() if user.fecha_eliminacion else None
+                    item['eliminado_por_nombre'] = user.eliminado_por.nombre_completo if user.eliminado_por else None
+                except Usuario.DoesNotExist:
+                    continue
+
+                enriched_data.append(item)
+
+            return Response(enriched_data)
 
         except Exception as e:
             print(f"Error obteniendo usuarios eliminados: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
             return Response(
                 {'error': 'Error al obtener usuarios eliminados'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -1252,3 +1371,300 @@ class GenerarCodigoCotelView(APIView):
                 {"error": f"Error al generar código COTEL: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class EstadisticasUsuariosView(APIView):
+    """Vista para estadísticas generales del sistema - ACTUALIZADA"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        """Obtener estadísticas del sistema incluyendo usuarios eliminados"""
+        try:
+            from django.db.models import Count, Q
+            from datetime import timedelta
+
+            # Obtener fechas para filtros temporales
+            hoy = timezone.now().date()
+            hace_una_semana = hoy - timedelta(days=7)
+            hace_un_mes = hoy - timedelta(days=30)
+
+            # ========== ESTADÍSTICAS DE USUARIOS ==========
+
+            # Usuarios totales (sin eliminados)
+            total_usuarios = Usuario.objects.count()
+            usuarios_activos = Usuario.objects.filter(is_active=True).count()
+            usuarios_inactivos = total_usuarios - usuarios_activos
+
+            # NUEVO: Usuarios eliminados
+            usuarios_eliminados = Usuario.objects.with_deleted().filter(eliminado=True).count()
+
+            # Usuarios por tipo
+            usuarios_manuales = Usuario.objects.filter(codigocotel__gte=9000, persona__isnull=True).count()
+            usuarios_migrados = Usuario.objects.filter(
+                Q(codigocotel__lt=9000) | Q(persona__isnull=False)
+            ).count()
+
+            # Estados especiales
+            usuarios_bloqueados = Usuario.objects.filter(bloqueado_hasta__gt=timezone.now()).count()
+            usuarios_password_pendiente = Usuario.objects.filter(
+                Q(password_changed=False) | Q(password_reset_required=True)
+            ).count()
+
+            # ========== ESTADÍSTICAS DE ELIMINADOS POR PERÍODO ==========
+
+            eliminados_hoy = Usuario.objects.with_deleted().filter(
+                eliminado=True,
+                fecha_eliminacion__date=hoy
+            ).count()
+
+            eliminados_semana = Usuario.objects.with_deleted().filter(
+                eliminado=True,
+                fecha_eliminacion__date__gte=hace_una_semana
+            ).count()
+
+            eliminados_mes = Usuario.objects.with_deleted().filter(
+                eliminado=True,
+                fecha_eliminacion__date__gte=hace_un_mes
+            ).count()
+
+            # ========== TOP ELIMINADORES (ÚLTIMOS 30 DÍAS) ==========
+
+            top_eliminadores_query = Usuario.objects.with_deleted().filter(
+                eliminado=True,
+                fecha_eliminacion__date__gte=hace_un_mes,
+                eliminado_por__isnull=False
+            ).values(
+                'eliminado_por__id',
+                'eliminado_por__nombres',
+                'eliminado_por__apellidopaterno',
+                'eliminado_por__apellidomaterno'
+            ).annotate(
+                total_eliminaciones=Count('id')
+            ).order_by('-total_eliminaciones')[:5]
+
+            top_eliminadores = []
+            for item in top_eliminadores_query:
+                nombre_completo = f"{item['eliminado_por__nombres']} {item['eliminado_por__apellidopaterno']} {item['eliminado_por__apellidomaterno'] or ''}".strip()
+                top_eliminadores.append({
+                    'usuario_id': item['eliminado_por__id'],
+                    'nombre_completo': nombre_completo,
+                    'total_eliminaciones': item['total_eliminaciones']
+                })
+
+            # ========== ESTADÍSTICAS DE ROLES ==========
+
+            total_roles = Roles.objects.count()
+            roles_activos = Roles.objects.filter(activo=True).count()
+
+            # ========== ESTADÍSTICAS DE PERMISOS ==========
+
+            total_permisos = Permission.objects.count()
+            permisos_activos = Permission.objects.filter(activo=True).count()
+
+            # ========== ESTADÍSTICAS DE ACTIVIDAD ==========
+
+            hace_30_dias = timezone.now() - timedelta(days=30)
+            logs_30_dias = AuditLog.objects.filter(fecha_hora__gte=hace_30_dias).count()
+
+            # Actividad de eliminación en los últimos 30 días
+            logs_eliminacion_30_dias = AuditLog.objects.filter(
+                fecha_hora__gte=hace_30_dias,
+                accion='DELETE',
+                app_label='usuarios',
+                model_name='usuario'
+            ).count()
+
+            # Actividad de restauración en los últimos 30 días
+            logs_restauracion_30_dias = AuditLog.objects.filter(
+                fecha_hora__gte=hace_30_dias,
+                accion='RESTORE',
+                app_label='usuarios',
+                model_name='usuario'
+            ).count()
+
+            # ========== ESTADÍSTICAS DE MIGRACIÓN ==========
+
+            try:
+                # Total empleados disponibles en FDW
+                total_empleados_fdw = Empleado_fdw.objects.filter(estadoempleado=0).count()
+
+                # Porcentaje de migración (incluyendo eliminados)
+                total_usuarios_sistema = Usuario.objects.with_deleted().count()
+                porcentaje_migracion = round(
+                    (total_usuarios_sistema / total_empleados_fdw * 100), 2
+                ) if total_empleados_fdw > 0 else 0
+
+            except Exception as e:
+                print(f"Error calculando estadísticas FDW: {e}")
+                total_empleados_fdw = 0
+                porcentaje_migracion = 0
+
+            # ========== RESPUESTA COMPLETA ==========
+
+            return Response({
+                "usuarios": {
+                    "total": total_usuarios,
+                    "activos": usuarios_activos,
+                    "inactivos": usuarios_inactivos,
+                    "eliminados": usuarios_eliminados,  # NUEVO
+                    "manuales": usuarios_manuales,
+                    "migrados": usuarios_migrados,
+                    "bloqueados": usuarios_bloqueados,
+                    "password_pendiente": usuarios_password_pendiente
+                },
+                "eliminados": {  # NUEVA SECCIÓN
+                    "total": usuarios_eliminados,
+                    "hoy": eliminados_hoy,
+                    "ultima_semana": eliminados_semana,
+                    "ultimo_mes": eliminados_mes,
+                    "top_eliminadores": top_eliminadores,
+                    "porcentaje_del_total": round(
+                        (usuarios_eliminados / (total_usuarios + usuarios_eliminados) * 100), 2
+                    ) if (total_usuarios + usuarios_eliminados) > 0 else 0
+                },
+                "roles": {
+                    "total": total_roles,
+                    "activos": roles_activos,
+                    "inactivos": total_roles - roles_activos
+                },
+                "permisos": {
+                    "total": total_permisos,
+                    "activos": permisos_activos,
+                    "inactivos": total_permisos - permisos_activos
+                },
+                "actividad": {
+                    "logs_30_dias": logs_30_dias,
+                    "eliminaciones_30_dias": logs_eliminacion_30_dias,  # NUEVO
+                    "restauraciones_30_dias": logs_restauracion_30_dias,  # NUEVO
+                    "ratio_eliminacion_restauracion": round(
+                        logs_eliminacion_30_dias / logs_restauracion_30_dias, 2
+                    ) if logs_restauracion_30_dias > 0 else logs_eliminacion_30_dias
+                },
+                "migracion": {  # NUEVA SECCIÓN
+                    "total_empleados_fdw": total_empleados_fdw,
+                    "total_usuarios_sistema": total_usuarios_sistema,
+                    "porcentaje_migracion": porcentaje_migracion,
+                    "usuarios_activos_migracion": total_usuarios,
+                    "usuarios_eliminados_migracion": usuarios_eliminados
+                },
+                "resumen": {  # NUEVO RESUMEN EJECUTIVO
+                    "salud_sistema": self._calcular_salud_sistema(
+                        usuarios_activos, usuarios_eliminados, usuarios_bloqueados
+                    ),
+                    "tendencia_eliminacion": self._calcular_tendencia_eliminacion(
+                        eliminados_hoy, eliminados_semana, eliminados_mes
+                    ),
+                    "recomendaciones": self._generar_recomendaciones(
+                        usuarios_eliminados, eliminados_mes, usuarios_bloqueados
+                    )
+                }
+            })
+
+        except Exception as e:
+            print(f"Error al obtener estadísticas: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            return Response(
+                {"error": f"Error al obtener estadísticas: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def _calcular_salud_sistema(self, activos, eliminados, bloqueados):
+        """Calcular indicador general de salud del sistema"""
+        total = activos + eliminados
+        if total == 0:
+            return {"estado": "sin_datos", "puntuacion": 0}
+
+        # Factores que afectan la salud
+        ratio_activos = activos / total
+        ratio_eliminados = eliminados / total if total > 0 else 0
+        ratio_bloqueados = bloqueados / activos if activos > 0 else 0
+
+        # Cálculo de puntuación (0-100)
+        puntuacion = 100
+        puntuacion -= (ratio_eliminados * 30)  # Penalizar eliminados
+        puntuacion -= (ratio_bloqueados * 20)  # Penalizar bloqueados
+        puntuacion = max(0, min(100, puntuacion))
+
+        if puntuacion >= 80:
+            estado = "excelente"
+        elif puntuacion >= 60:
+            estado = "bueno"
+        elif puntuacion >= 40:
+            estado = "regular"
+        else:
+            estado = "critico"
+
+        return {
+            "estado": estado,
+            "puntuacion": round(puntuacion, 1),
+            "factores": {
+                "ratio_activos": round(ratio_activos * 100, 1),
+                "ratio_eliminados": round(ratio_eliminados * 100, 1),
+                "ratio_bloqueados": round(ratio_bloqueados * 100, 1)
+            }
+        }
+
+    def _calcular_tendencia_eliminacion(self, hoy, semana, mes):
+        """Calcular tendencia de eliminaciones"""
+        if mes == 0:
+            return {"tendencia": "estable", "descripcion": "Sin eliminaciones recientes"}
+
+        # Promedio diario del mes vs. hoy
+        promedio_diario_mes = mes / 30
+
+        if hoy > promedio_diario_mes * 2:
+            tendencia = "alta"
+            descripcion = "Eliminaciones por encima del promedio"
+        elif hoy < promedio_diario_mes * 0.5:
+            tendencia = "baja"
+            descripcion = "Eliminaciones por debajo del promedio"
+        else:
+            tendencia = "normal"
+            descripcion = "Eliminaciones dentro del rango normal"
+
+        return {
+            "tendencia": tendencia,
+            "descripcion": descripcion,
+            "promedio_diario": round(promedio_diario_mes, 2),
+            "eliminaciones_hoy": hoy
+        }
+
+    def _generar_recomendaciones(self, total_eliminados, eliminados_mes, bloqueados):
+        """Generar recomendaciones basadas en las estadísticas"""
+        recomendaciones = []
+
+        if total_eliminados > 50:
+            recomendaciones.append({
+                "tipo": "atencion",
+                "titulo": "Alto número de usuarios eliminados",
+                "descripcion": f"Hay {total_eliminados} usuarios eliminados. Considere revisar si algunos pueden ser restaurados.",
+                "accion": "Revisar usuarios eliminados"
+            })
+
+        if eliminados_mes > 20:
+            recomendaciones.append({
+                "tipo": "advertencia",
+                "titulo": "Muchas eliminaciones recientes",
+                "descripcion": f"Se eliminaron {eliminados_mes} usuarios en el último mes. Verifique si hay un patrón.",
+                "accion": "Analizar causas de eliminación"
+            })
+
+        if bloqueados > 10:
+            recomendaciones.append({
+                "tipo": "accion",
+                "titulo": "Usuarios bloqueados",
+                "descripcion": f"Hay {bloqueados} usuarios bloqueados. Considere desbloquear o resetear contraseñas.",
+                "accion": "Revisar usuarios bloqueados"
+            })
+
+        if not recomendaciones:
+            recomendaciones.append({
+                "tipo": "ok",
+                "titulo": "Sistema en buen estado",
+                "descripcion": "No se detectaron problemas significativos en el sistema de usuarios.",
+                "accion": "Mantener monitoreo regular"
+            })
+
+        return recomendaciones
