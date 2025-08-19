@@ -294,7 +294,7 @@ class UsuarioListSerializer(serializers.ModelSerializer):
             'id', 'codigocotel', 'nombre_completo', 'nombres',
             'apellidopaterno', 'apellidomaterno', 'estadoempleado',
             'fechaingreso', 'fecha_creacion', 'is_active',
-            'password_changed', 'password_reset_required', 'rol_nombre',
+            'password_changed', 'password_reset_required', 'rol_nombre','rol_id',
             'tipo_usuario', 'estado_password', 'esta_bloqueado',
             'creado_por_nombre', 'last_login', 'intentos_login_fallidos',
             'eliminado', 'fecha_eliminacion', 'eliminado_por_nombre'
