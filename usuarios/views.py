@@ -635,16 +635,26 @@ class UsuarioViewSet(ModelViewSet):
     ordering = ['-fecha_creacion']
 
     def get_queryset(self):
-        """Queryset con filtros - ACTUALIZADO para incluir eliminados"""
-        # MODIFICADO: Usar with_deleted si se solicita incluir eliminados
+        """Queryset con filtros - ACTUALIZADO para soportar solo eliminados"""
+
+        # CORREGIDO: Manejo mejorado de filtros de eliminados
         with_deleted = self.request.query_params.get('with_deleted', 'false').lower() == 'true'
+        eliminados_only = self.request.query_params.get('eliminados_only', 'false').lower() == 'true'
 
-        if with_deleted:
-            queryset = Usuario.objects.with_deleted().select_related('rol', 'creado_por')
+        if eliminados_only:
+            # NUEVO: Solo usuarios eliminados
+            queryset = Usuario.objects.deleted_only().select_related('rol', 'creado_por', 'eliminado_por')
+            print("🗑️ Aplicando filtro: SOLO eliminados")
+        elif with_deleted:
+            # Incluir eliminados con activos
+            queryset = Usuario.objects.with_deleted().select_related('rol', 'creado_por', 'eliminado_por')
+            print("📋 Aplicando filtro: Incluyendo eliminados")
         else:
+            # Solo usuarios activos (comportamiento por defecto)
             queryset = Usuario.objects.all().select_related('rol', 'creado_por')
+            print("✅ Aplicando filtro: Solo activos")
 
-        # Filtro por tipo de usuario
+        # Resto de filtros existentes...
         tipo = self.request.query_params.get('tipo', None)
         if tipo == 'manual':
             queryset = queryset.filter(codigocotel__gte=9000, persona__isnull=True)

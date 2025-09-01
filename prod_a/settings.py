@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 from datetime import timedelta
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -162,6 +163,7 @@ AUTHENTICATION_BACKENDS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
+        "rest_framework.authentication.SessionAuthentication",
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     )
 }
@@ -170,3 +172,30 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
 }
+
+#===== CONFIGURACIÓN DE ARCHIVOS MEDIA (para importación) =====
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Crear carpetas necesarias
+if not os.path.exists(MEDIA_ROOT):
+    os.makedirs(MEDIA_ROOT)
+
+# Carpetas específicas para almacenes
+UPLOAD_DIRS = {
+    'importacion': os.path.join(MEDIA_ROOT, 'almacenes', 'importacion'),
+    'reportes': os.path.join(MEDIA_ROOT, 'almacenes', 'reportes'),
+    'temp': os.path.join(MEDIA_ROOT, 'temp'),
+}
+
+for folder in UPLOAD_DIRS.values():
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+# ===== CONFIGURACIÓN DE ARCHIVOS ESTÁTICOS =====
+STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+] if os.path.exists(os.path.join(BASE_DIR, 'static')) else []
