@@ -354,7 +354,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         total_lotes = lotes.count()
 
         # Lotes por estado
-        from .models import EstadoLoteChoices
+        from ..models import EstadoLoteChoices
         lotes_por_estado = {}
         for estado_choice in EstadoLoteChoices.choices:
             estado_codigo, estado_nombre = estado_choice
