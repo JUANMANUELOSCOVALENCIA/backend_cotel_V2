@@ -14,8 +14,8 @@ import json
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     Almacen, Proveedor, Lote, Material, TraspasoAlmacen, DevolucionProveedor,
-    TipoMaterialChoices, EstadoMaterialONUChoices, EstadoMaterialGeneralChoices,
-    EstadoLoteChoices, EstadoTraspasoChoices, EstadoDevolucionChoices
+    TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral,
+    EstadoLote, EstadoTraspaso, EstadoDevolucion
 )
 from ..serializers import EstadisticasGeneralesSerializer
 
@@ -35,42 +35,48 @@ class EstadisticasGeneralesView(APIView):
 
         # ===== ESTADO DE LOTES =====
         lotes_activos = Lote.objects.filter(
-            estado__in=[EstadoLoteChoices.ACTIVO, EstadoLoteChoices.RECEPCION_PARCIAL]
+            estado__codigo__in=['ACTIVO', 'RECEPCION_PARCIAL']
         ).count()
 
         lotes_por_estado = {}
-        for estado_choice in EstadoLoteChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = Lote.objects.filter(estado=estado_codigo).count()
-            lotes_por_estado[estado_nombre] = count
+        for estado in EstadoLote.objects.filter(activo=True):
+            count = Lote.objects.filter(estado=estado).count()
+            lotes_por_estado[estado.nombre] = count
 
         # ===== OPERACIONES ACTIVAS =====
         traspasos_pendientes = TraspasoAlmacen.objects.filter(
-            estado__in=[EstadoTraspasoChoices.PENDIENTE, EstadoTraspasoChoices.EN_TRANSITO]
+            estado__codigo__in=['PENDIENTE', 'EN_TRANSITO']
         ).count()
 
         devoluciones_pendientes = DevolucionProveedor.objects.filter(
-            estado__in=[EstadoDevolucionChoices.PENDIENTE, EstadoDevolucionChoices.ENVIADO]
+            estado__codigo__in=['PENDIENTE', 'ENVIADO']
         ).count()
 
         # ===== MATERIALES EN LABORATORIO =====
-        materiales_laboratorio = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
-            estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO
-        ).count()
+        # Obtener tipo de material ONU
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            materiales_laboratorio = Material.objects.filter(
+                tipo_material=tipo_onu,
+                estado_onu__codigo='EN_LABORATORIO'
+            ).count()
+        except TipoMaterial.DoesNotExist:
+            materiales_laboratorio = 0
 
         # ===== ESTADÍSTICAS POR ALMACÉN =====
         almacenes_stats = []
         for almacen in Almacen.objects.filter(activo=True):
             total = almacen.material_set.count()
+
+            # Materiales disponibles (tanto ONU como generales)
             disponibles = almacen.material_set.filter(
-                Q(tipo_material=TipoMaterialChoices.ONU, estado_onu=EstadoMaterialONUChoices.DISPONIBLE) |
-                Q(estado_general=EstadoMaterialGeneralChoices.DISPONIBLE)
+                Q(estado_onu__codigo='DISPONIBLE', estado_onu__activo=True) |
+                Q(estado_general__codigo='DISPONIBLE', estado_general__activo=True)
             ).count()
 
             reservados = almacen.material_set.filter(
-                Q(tipo_material=TipoMaterialChoices.ONU, estado_onu=EstadoMaterialONUChoices.RESERVADO) |
-                Q(estado_general=EstadoMaterialGeneralChoices.RESERVADO)
+                Q(estado_onu__codigo='RESERVADO', estado_onu__activo=True) |
+                Q(estado_general__codigo='RESERVADO', estado_general__activo=True)
             ).count()
 
             en_transito = almacen.material_set.filter(
@@ -78,16 +84,15 @@ class EstadisticasGeneralesView(APIView):
             ).count()
 
             defectuosos = almacen.material_set.filter(
-                Q(tipo_material=TipoMaterialChoices.ONU, estado_onu=EstadoMaterialONUChoices.DEFECTUOSO) |
-                Q(estado_general=EstadoMaterialGeneralChoices.DEFECTUOSO)
+                Q(estado_onu__codigo='DEFECTUOSO', estado_onu__activo=True) |
+                Q(estado_general__codigo='DEFECTUOSO', estado_general__activo=True)
             ).count()
 
             # Por tipo de material
             por_tipo = {}
-            for tipo_choice in TipoMaterialChoices.choices:
-                tipo_codigo, tipo_nombre = tipo_choice
-                count = almacen.material_set.filter(tipo_material=tipo_codigo).count()
-                por_tipo[tipo_nombre] = count
+            for tipo in TipoMaterial.objects.filter(activo=True):
+                count = almacen.material_set.filter(tipo_material=tipo).count()
+                por_tipo[tipo.nombre] = count
 
             almacenes_stats.append({
                 'almacen_id': almacen.id,
@@ -186,7 +191,7 @@ class DashboardView(APIView):
 
         # ===== EFICIENCIA DE TRASPASOS =====
         traspasos_completados = TraspasoAlmacen.objects.filter(
-            estado=EstadoTraspasoChoices.RECIBIDO,
+            estado__codigo='RECIBIDO',
             fecha_recepcion__date__gte=hace_30_dias
         )
 
@@ -212,27 +217,42 @@ class DashboardView(APIView):
         tendencia_lotes = 'subida' if lotes_semana > lotes_semana_anterior else 'bajada' if lotes_semana < lotes_semana_anterior else 'estable'
 
         # ===== TAREAS PENDIENTES =====
-        tareas_pendientes = {
-            'materiales_nuevos_sin_inspeccionar': Material.objects.filter(
-                tipo_material=TipoMaterialChoices.ONU,
-                es_nuevo=True,
-                estado_onu=EstadoMaterialONUChoices.NUEVO
-            ).count(),
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+            estado_en_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+            estado_en_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+            estado_pendiente_dev = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
 
-            'traspasos_por_confirmar': TraspasoAlmacen.objects.filter(
-                estado=EstadoTraspasoChoices.EN_TRANSITO
-            ).count(),
+            tareas_pendientes = {
+                'materiales_nuevos_sin_inspeccionar': Material.objects.filter(
+                    tipo_material=tipo_onu,
+                    es_nuevo=True,
+                    estado_onu=estado_nuevo
+                ).count(),
 
-            'devoluciones_por_enviar': DevolucionProveedor.objects.filter(
-                estado=EstadoDevolucionChoices.PENDIENTE
-            ).count(),
+                'traspasos_por_confirmar': TraspasoAlmacen.objects.filter(
+                    estado=estado_en_transito
+                ).count(),
 
-            'materiales_laboratorio_mas_15_dias': Material.objects.filter(
-                tipo_material=TipoMaterialChoices.ONU,
-                estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO,
-                fecha_envio_laboratorio__date__lt=hoy - timedelta(days=15)
-            ).count()
-        }
+                'devoluciones_por_enviar': DevolucionProveedor.objects.filter(
+                    estado=estado_pendiente_dev
+                ).count(),
+
+                'materiales_laboratorio_mas_15_dias': Material.objects.filter(
+                    tipo_material=tipo_onu,
+                    estado_onu=estado_en_laboratorio,
+                    fecha_envio_laboratorio__date__lt=hoy - timedelta(days=15)
+                ).count()
+            }
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist,
+                EstadoTraspaso.DoesNotExist, EstadoDevolucion.DoesNotExist):
+            tareas_pendientes = {
+                'materiales_nuevos_sin_inspeccionar': 0,
+                'traspasos_por_confirmar': 0,
+                'devoluciones_por_enviar': 0,
+                'materiales_laboratorio_mas_15_dias': 0
+            }
 
         return Response({
             'actividad_hoy': {
@@ -276,7 +296,7 @@ class ReporteInventarioView(APIView):
 
         formato = request.query_params.get('formato', 'json')  # json, csv, excel
         almacen_id = request.query_params.get('almacen_id')
-        tipo_material = request.query_params.get('tipo_material')
+        tipo_material_id = request.query_params.get('tipo_material')
 
         # Filtrar materiales según criterios
         materiales = Material.objects.all()
@@ -284,8 +304,8 @@ class ReporteInventarioView(APIView):
         if almacen_id:
             materiales = materiales.filter(almacen_actual_id=almacen_id)
 
-        if tipo_material:
-            materiales = materiales.filter(tipo_material=tipo_material)
+        if tipo_material_id:
+            materiales = materiales.filter(tipo_material_id=tipo_material_id)
 
         # Agrupar por almacén y tipo
         reporte_data = {}
@@ -299,32 +319,28 @@ class ReporteInventarioView(APIView):
             if almacen_materiales.exists():
                 por_tipo = {}
 
-                for tipo_choice in TipoMaterialChoices.choices:
-                    tipo_codigo, tipo_nombre = tipo_choice
-
-                    if tipo_material and tipo_material != tipo_codigo:
+                for tipo_material in TipoMaterial.objects.filter(activo=True):
+                    if tipo_material_id and str(tipo_material.id) != tipo_material_id:
                         continue
 
-                    tipo_materiales = almacen_materiales.filter(tipo_material=tipo_codigo)
+                    tipo_materiales = almacen_materiales.filter(tipo_material=tipo_material)
 
                     if tipo_materiales.exists():
                         # Estados según tipo de material
                         estados_info = {}
 
-                        if tipo_codigo == TipoMaterialChoices.ONU:
-                            for estado_choice in EstadoMaterialONUChoices.choices:
-                                estado_cod, estado_nom = estado_choice
-                                count = tipo_materiales.filter(estado_onu=estado_cod).count()
+                        if tipo_material.es_unico:
+                            for estado in EstadoMaterialONU.objects.filter(activo=True):
+                                count = tipo_materiales.filter(estado_onu=estado).count()
                                 if count > 0:
-                                    estados_info[estado_nom] = count
+                                    estados_info[estado.nombre] = count
                         else:
-                            for estado_choice in EstadoMaterialGeneralChoices.choices:
-                                estado_cod, estado_nom = estado_choice
-                                count = tipo_materiales.filter(estado_general=estado_cod).count()
+                            for estado in EstadoMaterialGeneral.objects.filter(activo=True):
+                                count = tipo_materiales.filter(estado_general=estado).count()
                                 if count > 0:
-                                    estados_info[estado_nom] = count
+                                    estados_info[estado.nombre] = count
 
-                        por_tipo[tipo_nombre] = {
+                        por_tipo[tipo_material.nombre] = {
                             'total': tipo_materiales.count(),
                             'por_estado': estados_info,
                             'por_modelo': list(tipo_materiales.values(
@@ -347,7 +363,7 @@ class ReporteInventarioView(APIView):
                 'fecha_reporte': datetime.now().isoformat(),
                 'criterios': {
                     'almacen_id': almacen_id,
-                    'tipo_material': tipo_material
+                    'tipo_material': tipo_material_id
                 },
                 'inventario': reporte_data
             })
@@ -424,7 +440,7 @@ class ReporteMovimientosView(APIView):
                     'origen': traspaso.almacen_origen.nombre,
                     'destino': traspaso.almacen_destino.nombre,
                     'cantidad': traspaso.cantidad_enviada,
-                    'estado': traspaso.get_estado_display(),
+                    'estado': traspaso.estado.nombre if traspaso.estado else 'Sin estado',
                     'motivo': traspaso.motivo
                 })
 
@@ -444,7 +460,7 @@ class ReporteMovimientosView(APIView):
                     'origen': devolucion.lote_origen.almacen_destino.nombre,
                     'destino': devolucion.proveedor.nombre_comercial,
                     'cantidad': devolucion.cantidad_materiales,
-                    'estado': devolucion.get_estado_display(),
+                    'estado': devolucion.estado.nombre if devolucion.estado else 'Sin estado',
                     'motivo': devolucion.motivo[:100] + '...' if len(devolucion.motivo) > 100 else devolucion.motivo
                 })
 
@@ -506,10 +522,10 @@ class ReporteGarantiasView(APIView):
             if materiales_lote.exists():
                 # Agrupar por estado según tipo de material
                 for material in materiales_lote:
-                    if material.tipo_material == TipoMaterialChoices.ONU:
-                        estado = material.get_estado_onu_display() if material.estado_onu else 'Sin estado'
+                    if material.tipo_material.es_unico:
+                        estado = material.estado_onu.nombre if material.estado_onu else 'Sin estado'
                     else:
-                        estado = material.get_estado_general_display()
+                        estado = material.estado_general.nombre if material.estado_general else 'Sin estado'
 
                     estados_materiales[estado] = estados_materiales.get(estado, 0) + 1
 
@@ -560,7 +576,7 @@ class ReporteEficienciaView(APIView):
         )
 
         traspasos_completados = traspasos_periodo.filter(
-            estado=EstadoTraspasoChoices.RECIBIDO
+            estado__codigo='RECIBIDO'
         )
 
         # Tiempo promedio de traspasos
@@ -588,19 +604,21 @@ class ReporteEficienciaView(APIView):
         tiempo_promedio_laboratorio = sum(tiempos_laboratorio) / len(tiempos_laboratorio) if tiempos_laboratorio else 0
 
         # Tasa de éxito del laboratorio
-        exitosos = materiales_laboratorio.filter(
-            estado_onu=EstadoMaterialONUChoices.DISPONIBLE
-        ).count()
+        try:
+            estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+            exitosos = materiales_laboratorio.filter(estado_onu=estado_disponible).count()
+        except EstadoMaterialONU.DoesNotExist:
+            exitosos = 0
 
         tasa_exito_laboratorio = (
-                    exitosos / materiales_laboratorio.count() * 100) if materiales_laboratorio.count() > 0 else 0
+                exitosos / materiales_laboratorio.count() * 100) if materiales_laboratorio.count() > 0 else 0
 
         # ===== ROTACIÓN DE INVENTARIO =====
         materiales_salida = Material.objects.filter(
             created_at__date__gte=fecha_desde
         ).exclude(
-            Q(estado_onu=EstadoMaterialONUChoices.DISPONIBLE) |
-            Q(estado_general=EstadoMaterialGeneralChoices.DISPONIBLE)
+            Q(estado_onu__codigo='DISPONIBLE') |
+            Q(estado_general__codigo='DISPONIBLE')
         ).count()
 
         inventario_promedio = Material.objects.count()
@@ -617,7 +635,7 @@ class ReporteEficienciaView(APIView):
             )
 
             traspasos_completados_almacen = traspasos_salida.filter(
-                estado=EstadoTraspasoChoices.RECIBIDO
+                estado__codigo='RECIBIDO'
             )
 
             eficiencia_traspaso = (

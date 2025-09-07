@@ -89,7 +89,7 @@ WSGI_APPLICATION = 'prod_a.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE':'django.db.backends.postgresql',
-        'NAME': 'prod_a_cotel',
+        'NAME': 'manager_cotel',
         'USER': 'svpost',
         'PASSWORD': 'postgresql',
         'HOST': '100.97.134.106',  # O la dirección de tu servidor PostgreSQL

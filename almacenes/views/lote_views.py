@@ -1,6 +1,7 @@
 # ======================================================
-# almacenes/views/lote_views.py
+# almacenes/views/lote_views.py - ACTUALIZADO SIN TEXTCHOICES
 # Views para gestión de lotes y importación masiva
+#ImportacionMasivaSerializer
 # ======================================================
 
 from django.db import transaction
@@ -16,12 +17,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     Lote, LoteDetalle, EntregaParcialLote, Material, Almacen,
-    TipoIngresoChoices, EstadoLoteChoices, TipoMaterialChoices,
-    EstadoMaterialONUChoices
+    # CAMBIADO: Importar los modelos en lugar de TextChoices
+    TipoIngreso, EstadoLote, TipoMaterial, EstadoMaterialONU
 )
 from ..serializers import (
     LoteSerializer, LoteCreateSerializer, LoteDetalleSerializer,
-    EntregaParcialLoteSerializer, ImportacionMasivaSerializer,
+    EntregaParcialLoteSerializer,
     MaterialListSerializer
 )
 
@@ -29,7 +30,8 @@ from ..serializers import (
 class LoteViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión completa de lotes"""
     queryset = Lote.objects.all().select_related(
-        'proveedor', 'almacen_destino', 'tipo_servicio', 'created_by'
+        'proveedor', 'almacen_destino', 'tipo_servicio', 'created_by',
+        'tipo_ingreso', 'estado'  # AGREGADO: incluir las relaciones FK
     ).prefetch_related('detalles__modelo__marca')
     permission_classes = [IsAuthenticated, GenericRolePermission]
     basename = 'lotes'
@@ -70,19 +72,20 @@ class LoteViewSet(viewsets.ModelViewSet):
 
             # Estados de materiales de este modelo (solo para ONUs)
             estados_info = {}
-            if detalle.modelo.tipo_material == TipoMaterialChoices.ONU:
-                for estado_choice in EstadoMaterialONUChoices.choices:
-                    estado_codigo, estado_nombre = estado_choice
-                    count = materiales_del_modelo.filter(estado_onu=estado_codigo).count()
+            if detalle.modelo.tipo_material.es_unico:  # CAMBIADO: usar .es_unico
+                # Obtener estados ONU y contar materiales en cada estado
+                estados_onu = EstadoMaterialONU.objects.filter(activo=True)
+                for estado in estados_onu:
+                    count = materiales_del_modelo.filter(estado_onu=estado).count()
                     if count > 0:
-                        estados_info[estado_nombre] = count
+                        estados_info[estado.nombre] = count
 
             detalles_info.append({
                 'modelo_id': detalle.modelo.id,
                 'modelo_nombre': f"{detalle.modelo.marca.nombre} {detalle.modelo.nombre}",
                 'codigo_modelo': detalle.modelo.codigo_modelo,
-                'tipo_material': detalle.modelo.get_tipo_material_display(),
-                'unidad_medida': detalle.modelo.get_unidad_medida_display(),
+                'tipo_material': detalle.modelo.tipo_material.nombre if detalle.modelo.tipo_material else 'Sin tipo',
+                'unidad_medida': detalle.modelo.unidad_medida.simbolo if detalle.modelo.unidad_medida else 'N/A',
                 'cantidad_esperada': detalle.cantidad,
                 'cantidad_recibida': materiales_del_modelo.count(),
                 'cantidad_pendiente': max(0, detalle.cantidad - materiales_del_modelo.count()),
@@ -100,8 +103,8 @@ class LoteViewSet(viewsets.ModelViewSet):
                 'id': lote.id,
                 'numero_lote': lote.numero_lote,
                 'proveedor': lote.proveedor.nombre_comercial,
-                'tipo_ingreso': lote.get_tipo_ingreso_display(),
-                'estado': lote.get_estado_display(),
+                'tipo_ingreso': lote.tipo_ingreso.nombre if lote.tipo_ingreso else 'Sin tipo',
+                'estado': lote.estado.nombre if lote.estado else 'Sin estado',
                 'almacen_destino': lote.almacen_destino.nombre,
                 'fecha_recepcion': lote.fecha_recepcion,
                 'fecha_inicio_garantia': lote.fecha_inicio_garantia,
@@ -127,11 +130,16 @@ class LoteViewSet(viewsets.ModelViewSet):
         """Agregar una nueva entrega parcial al lote"""
         lote = self.get_object()
 
-        if lote.estado == EstadoLoteChoices.CERRADO:
-            return Response(
-                {'error': 'No se pueden agregar entregas a un lote cerrado'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # CAMBIADO: Verificar usando el modelo EstadoLote
+        try:
+            estado_cerrado = EstadoLote.objects.get(codigo='CERRADO', activo=True)
+            if lote.estado == estado_cerrado:
+                return Response(
+                    {'error': 'No se pueden agregar entregas a un lote cerrado'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except EstadoLote.DoesNotExist:
+            pass
 
         data = request.data.copy()
         data['lote'] = lote.id
@@ -146,10 +154,15 @@ class LoteViewSet(viewsets.ModelViewSet):
                 lote.total_entregas_parciales += 1
 
                 # Actualizar estado del lote según las entregas
-                if lote.cantidad_recibida >= lote.cantidad_total:
-                    lote.estado = EstadoLoteChoices.RECEPCION_COMPLETA
-                else:
-                    lote.estado = EstadoLoteChoices.RECEPCION_PARCIAL
+                try:
+                    if lote.cantidad_recibida >= lote.cantidad_total:
+                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
+                        lote.estado = estado_completa
+                    else:
+                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
+                        lote.estado = estado_parcial
+                except EstadoLote.DoesNotExist:
+                    pass
 
                 lote.save()
 
@@ -165,19 +178,26 @@ class LoteViewSet(viewsets.ModelViewSet):
         """Cerrar lote (no se pueden agregar más materiales)"""
         lote = self.get_object()
 
-        if lote.estado == EstadoLoteChoices.CERRADO:
+        try:
+            estado_cerrado = EstadoLote.objects.get(codigo='CERRADO', activo=True)
+            if lote.estado == estado_cerrado:
+                return Response(
+                    {'error': 'El lote ya está cerrado'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except EstadoLote.DoesNotExist:
             return Response(
-                {'error': 'El lote ya está cerrado'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Estado CERRADO no configurado'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
         with transaction.atomic():
-            lote.estado = EstadoLoteChoices.CERRADO
+            lote.estado = estado_cerrado
             lote.save()
 
         return Response({
             'message': f'Lote {lote.numero_lote} cerrado correctamente',
-            'estado': lote.get_estado_display(),
+            'estado': lote.estado.nombre if lote.estado else 'Sin estado',
             'fecha_cierre': lote.updated_at
         })
 
@@ -186,10 +206,19 @@ class LoteViewSet(viewsets.ModelViewSet):
         """Reabrir lote cerrado (solo para administradores)"""
         lote = self.get_object()
 
-        if lote.estado != EstadoLoteChoices.CERRADO:
+        try:
+            estado_cerrado = EstadoLote.objects.get(codigo='CERRADO', activo=True)
+            estado_activo = EstadoLote.objects.get(codigo='ACTIVO', activo=True)
+
+            if lote.estado != estado_cerrado:
+                return Response(
+                    {'error': 'Solo se pueden reabrir lotes cerrados'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except EstadoLote.DoesNotExist:
             return Response(
-                {'error': 'Solo se pueden reabrir lotes cerrados'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Estados de lote no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
         # Verificar permisos especiales (puedes personalizar esto)
@@ -200,12 +229,12 @@ class LoteViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            lote.estado = EstadoLoteChoices.ACTIVO
+            lote.estado = estado_activo
             lote.save()
 
         return Response({
             'message': f'Lote {lote.numero_lote} reabierto correctamente',
-            'estado': lote.get_estado_display()
+            'estado': lote.estado.nombre if lote.estado else 'Sin estado'
         })
 
     @action(detail=True, methods=['get'])
@@ -215,18 +244,39 @@ class LoteViewSet(viewsets.ModelViewSet):
         materiales = lote.material_set.all()
 
         # Filtros opcionales
-        tipo_material = request.query_params.get('tipo_material')
+        tipo_material_codigo = request.query_params.get('tipo_material')
         estado = request.query_params.get('estado')
         modelo_id = request.query_params.get('modelo_id')
 
-        if tipo_material:
-            materiales = materiales.filter(tipo_material=tipo_material)
+        if tipo_material_codigo:
+            try:
+                tipo_material = TipoMaterial.objects.get(codigo=tipo_material_codigo, activo=True)
+                materiales = materiales.filter(tipo_material=tipo_material)
+            except TipoMaterial.DoesNotExist:
+                pass
 
         if estado:
-            if tipo_material == TipoMaterialChoices.ONU:
-                materiales = materiales.filter(estado_onu=estado)
-            else:
-                materiales = materiales.filter(estado_general=estado)
+            # Filtrar por estado según el tipo de material
+            if tipo_material_codigo:
+                try:
+                    tipo_material = TipoMaterial.objects.get(codigo=tipo_material_codigo, activo=True)
+                    if tipo_material.es_unico:
+                        # Es equipo único (ONU), filtrar por estado_onu
+                        try:
+                            estado_obj = EstadoMaterialONU.objects.get(codigo=estado, activo=True)
+                            materiales = materiales.filter(estado_onu=estado_obj)
+                        except EstadoMaterialONU.DoesNotExist:
+                            pass
+                    else:
+                        # Es material general, filtrar por estado_general
+                        try:
+                            from ..models import EstadoMaterialGeneral
+                            estado_obj = EstadoMaterialGeneral.objects.get(codigo=estado, activo=True)
+                            materiales = materiales.filter(estado_general=estado_obj)
+                        except:
+                            pass
+                except TipoMaterial.DoesNotExist:
+                    pass
 
         if modelo_id:
             materiales = materiales.filter(modelo_id=modelo_id)
@@ -244,22 +294,32 @@ class LoteViewSet(viewsets.ModelViewSet):
         """Enviar todos los materiales nuevos del lote a laboratorio"""
         lote = self.get_object()
 
-        if lote.tipo_ingreso != TipoIngresoChoices.NUEVO:
+        try:
+            tipo_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+
+            if lote.tipo_ingreso != tipo_nuevo:
+                return Response(
+                    {'error': 'Solo los lotes nuevos requieren inspección inicial'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (TipoIngreso.DoesNotExist, TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
             return Response(
-                {'error': 'Solo los lotes nuevos requieren inspección inicial'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Configuración de tipos y estados incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
         # Filtrar materiales que requieren laboratorio
         materiales_nuevos = lote.material_set.filter(
-            tipo_material=TipoMaterialChoices.ONU,
+            tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=EstadoMaterialONUChoices.NUEVO
+            estado_onu=estado_nuevo
         )
 
         if not materiales_nuevos.exists():
             return Response(
-                {'error': 'No hay materiales nuevos que requieran inspección'},
+                {'message': 'No hay materiales nuevos que requieran inspección'},
                 status=status.HTTP_200_OK
             )
 
@@ -278,19 +338,19 @@ class LoteViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def estadisticas(self, request):
         """Estadísticas generales de lotes"""
-        # Lotes por estado
+        # Lotes por estado usando el modelo EstadoLote
         por_estado = {}
-        for estado_choice in EstadoLoteChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = Lote.objects.filter(estado=estado_codigo).count()
-            por_estado[estado_nombre] = count
+        estados = EstadoLote.objects.filter(activo=True)
+        for estado in estados:
+            count = Lote.objects.filter(estado=estado).count()
+            por_estado[estado.nombre] = count
 
-        # Lotes por tipo de ingreso
+        # Lotes por tipo de ingreso usando el modelo TipoIngreso
         por_tipo = {}
-        for tipo_choice in TipoIngresoChoices.choices:
-            tipo_codigo, tipo_nombre = tipo_choice
-            count = Lote.objects.filter(tipo_ingreso=tipo_codigo).count()
-            por_tipo[tipo_nombre] = count
+        tipos = TipoIngreso.objects.filter(activo=True)
+        for tipo in tipos:
+            count = Lote.objects.filter(tipo_ingreso=tipo).count()
+            por_tipo[tipo.nombre] = count
 
         # Top proveedores por cantidad de lotes
         from django.db.models import Count
@@ -300,14 +360,20 @@ class LoteViewSet(viewsets.ModelViewSet):
             total_lotes=Count('id')
         ).order_by('-total_lotes')[:10]
 
+        # Lotes activos (usando los estados correspondientes)
+        try:
+            estado_activo = EstadoLote.objects.get(codigo='ACTIVO', activo=True)
+            estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
+            lotes_activos = Lote.objects.filter(estado__in=[estado_activo, estado_parcial]).count()
+        except EstadoLote.DoesNotExist:
+            lotes_activos = 0
+
         return Response({
             'total_lotes': Lote.objects.count(),
             'por_estado': por_estado,
             'por_tipo_ingreso': por_tipo,
             'top_proveedores': list(top_proveedores),
-            'lotes_activos': Lote.objects.filter(
-                estado__in=[EstadoLoteChoices.ACTIVO, EstadoLoteChoices.RECEPCION_PARCIAL]
-            ).count()
+            'lotes_activos': lotes_activos
         })
 
 
