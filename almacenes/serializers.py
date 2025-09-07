@@ -1,6 +1,6 @@
 # ======================================================
-# apps/almacenes/serializers.py
-# Serializers Completos para Sistema de Almacenes GPON/Fibra Óptica
+# apps/almacenes/serializers.py - ACTUALIZADOS SIN TEXTCHOICES
+# Serializers completos para React con objetos completos
 # ======================================================
 
 from django.db import transaction
@@ -13,6 +13,11 @@ from io import BytesIO
 from .models import (
     # Modelos base
     Almacen, Proveedor,
+
+    # Modelos de choices (antes TextChoices)
+    TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
+    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
+    RespuestaProveedor,
 
     # Modelos existentes actualizados
     Marca, TipoEquipo, Componente, EstadoEquipo, Modelo, ModeloComponente,
@@ -29,36 +34,146 @@ from .models import (
     HistorialMaterial,
 
     # Modelos para compatibilidad
-    EquipoONU, EquipoServicio,
-
-    # Enums
-    TipoMaterialChoices, UnidadMedidaChoices,
-    EstadoMaterialONUChoices, EstadoMaterialGeneralChoices,
-    TipoIngresoChoices, EstadoLoteChoices
+    EquipoONU, EquipoServicio
 )
 
 
-# ========== SERIALIZERS BASE ==========
+# ========== SERIALIZERS PARA MODELOS DE CHOICES ==========
+
+class TipoIngresoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TipoIngreso
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'activo', 'orden']
+
+
+class EstadoLoteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstadoLote
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'color', 'es_final', 'activo', 'orden']
+
+
+class EstadoTraspasoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstadoTraspaso
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'color', 'es_final', 'activo', 'orden']
+
+
+class TipoMaterialSerializer(serializers.ModelSerializer):
+    unidad_medida_default_info = serializers.SerializerMethodField()
+    materiales_count = serializers.ReadOnlyField()
+    modelos_count = serializers.ReadOnlyField()
+    created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
+
+    class Meta:
+        model = TipoMaterial
+        fields = [
+            'id', 'codigo', 'nombre', 'descripcion', 'unidad_medida_default',
+            'unidad_medida_default_info', 'requiere_inspeccion_inicial', 'es_unico',
+            'activo', 'orden', 'materiales_count', 'modelos_count',
+            'created_at', 'updated_at', 'created_by', 'created_by_nombre'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_unidad_medida_default_info(self, obj):
+        if obj.unidad_medida_default:
+            return {
+                'id': obj.unidad_medida_default.id,
+                'codigo': obj.unidad_medida_default.codigo,
+                'nombre': obj.unidad_medida_default.nombre,
+                'simbolo': obj.unidad_medida_default.simbolo
+            }
+        return None
+
+
+class UnidadMedidaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UnidadMedida
+        fields = ['id', 'codigo', 'nombre', 'simbolo', 'descripcion', 'activo', 'orden']
+
+
+class EstadoMaterialONUSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstadoMaterialONU
+        fields = [
+            'id', 'codigo', 'nombre', 'descripcion', 'color',
+            'permite_asignacion', 'permite_traspaso', 'activo', 'orden'
+        ]
+
+
+class EstadoMaterialGeneralSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstadoMaterialGeneral
+        fields = [
+            'id', 'codigo', 'nombre', 'descripcion', 'color',
+            'permite_consumo', 'permite_traspaso', 'activo', 'orden'
+        ]
+
+
+class TipoAlmacenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TipoAlmacen
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'activo', 'orden']
+
+
+class EstadoDevolucionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstadoDevolucion
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'color', 'es_final', 'activo', 'orden']
+
+
+class RespuestaProveedorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RespuestaProveedor
+        fields = ['id', 'codigo', 'nombre', 'descripcion', 'activo', 'orden']
+
+
+# ========== SERIALIZERS BASE ACTUALIZADOS ==========
 
 class AlmacenSerializer(serializers.ModelSerializer):
+    # Información completa de relaciones ForeignKey
+    tipo_info = serializers.SerializerMethodField()
+    encargado_info = serializers.ReadOnlyField()
+
+    # Propiedades calculadas
     total_materiales = serializers.ReadOnlyField()
     materiales_disponibles = serializers.ReadOnlyField()
+
+    # Información de auditoría
     created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
 
     class Meta:
         model = Almacen
         fields = [
-            'id', 'codigo', 'nombre', 'ciudad', 'tipo', 'direccion',
-            'es_principal', 'activo', 'observaciones',
+            'id', 'codigo', 'nombre', 'ciudad', 'tipo', 'tipo_info',
+            'direccion', 'es_principal', 'encargado', 'encargado_info',
+            'codigo_cotel_encargado', 'activo', 'observaciones',
             'total_materiales', 'materiales_disponibles',
             'created_at', 'updated_at', 'created_by', 'created_by_nombre'
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'encargado_info']
+
+    def get_tipo_info(self, obj):
+        if obj.tipo:
+            return {
+                'id': obj.tipo.id,
+                'codigo': obj.tipo.codigo,
+                'nombre': obj.tipo.nombre
+            }
+        return None
 
     def validate_codigo(self, value):
         if not value or len(value.strip()) < 2:
             raise serializers.ValidationError("El código debe tener al menos 2 caracteres")
         return value.strip().upper()
+
+    def validate_codigo_cotel_encargado(self, value):
+        if value:
+            try:
+                from usuarios.models import Usuario
+                Usuario.objects.get(codigo_cotel=value)
+            except Usuario.DoesNotExist:
+                raise serializers.ValidationError(f"No se encontró usuario con código COTEL: {value}")
+        return value
 
     def validate(self, data):
         # Validar que solo haya un almacén principal
@@ -86,11 +201,6 @@ class ProveedorSerializer(serializers.ModelSerializer):
 
     def get_lotes_count(self, obj):
         return obj.lote_set.count()
-
-    def validate_nombre_comercial(self, value):
-        if not value or len(value.strip()) < 2:
-            raise serializers.ValidationError("El nombre comercial debe tener al menos 2 caracteres")
-        return value.strip()
 
 
 # ========== SERIALIZERS DE MODELOS EXISTENTES ACTUALIZADOS ==========
@@ -141,36 +251,35 @@ class ComponenteSerializer(serializers.ModelSerializer):
         return obj.modelocomponente_set.filter(modelo__activo=True).count()
 
 
-class EstadoEquipoSerializer(serializers.ModelSerializer):
-    equipos_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = EstadoEquipo
-        fields = ['id', 'nombre', 'descripcion', 'activo', 'equipos_count', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def get_equipos_count(self, obj):
-        return obj.equipoonu_set.count()
-
-
 class ModeloComponenteSerializer(serializers.ModelSerializer):
-    componente_nombre = serializers.CharField(source='componente.nombre', read_only=True)
+    componente_info = serializers.SerializerMethodField()
 
     class Meta:
         model = ModeloComponente
-        fields = ['id', 'componente', 'componente_nombre', 'cantidad']
+        fields = ['id', 'componente', 'componente_info', 'cantidad']
+
+    def get_componente_info(self, obj):
+        return {
+            'id': obj.componente.id,
+            'nombre': obj.componente.nombre
+        }
 
 
 class ModeloSerializer(serializers.ModelSerializer):
-    marca_nombre = serializers.CharField(source='marca.nombre', read_only=True)
-    tipo_equipo_nombre = serializers.CharField(source='tipo_equipo.nombre', read_only=True)
-    tipo_material_display = serializers.CharField(source='get_tipo_material_display', read_only=True)
-    unidad_medida_display = serializers.CharField(source='get_unidad_medida_display', read_only=True)
+    # Información completa de relaciones ForeignKey
+    marca_info = serializers.SerializerMethodField()
+    tipo_equipo_info = serializers.SerializerMethodField()
+    tipo_material_info = serializers.SerializerMethodField()
+    unidad_medida_info = serializers.SerializerMethodField()
+
+    # Componentes
     componentes = ModeloComponenteSerializer(source='modelocomponente_set', many=True, read_only=True)
+
+    # Estadísticas
     materiales_count = serializers.SerializerMethodField()
     materiales_disponibles = serializers.SerializerMethodField()
 
-    # Para escritura
+    # Para escritura de componentes
     componentes_data = serializers.ListField(
         child=serializers.DictField(),
         write_only=True,
@@ -180,36 +289,56 @@ class ModeloSerializer(serializers.ModelSerializer):
     class Meta:
         model = Modelo
         fields = [
-            'id', 'marca', 'marca_nombre', 'tipo_equipo', 'tipo_equipo_nombre',
+            'id', 'marca', 'marca_info', 'tipo_equipo', 'tipo_equipo_info',
             'nombre', 'codigo_modelo', 'descripcion', 'activo',
-            'tipo_material', 'tipo_material_display', 'unidad_medida', 'unidad_medida_display',
+            'tipo_material', 'tipo_material_info', 'unidad_medida', 'unidad_medida_info',
             'cantidad_por_unidad', 'requiere_inspeccion_inicial',
             'componentes', 'materiales_count', 'materiales_disponibles',
             'created_at', 'updated_at', 'componentes_data'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
+    def get_marca_info(self, obj):
+        return {
+            'id': obj.marca.id,
+            'nombre': obj.marca.nombre
+        }
+
+    def get_tipo_equipo_info(self, obj):
+        return {
+            'id': obj.tipo_equipo.id,
+            'nombre': obj.tipo_equipo.nombre
+        }
+
+    def get_tipo_material_info(self, obj):
+        return {
+            'id': obj.tipo_material.id,
+            'codigo': obj.tipo_material.codigo,
+            'nombre': obj.tipo_material.nombre,
+            'es_unico': obj.tipo_material.es_unico,
+            'requiere_inspeccion_inicial': obj.tipo_material.requiere_inspeccion_inicial
+        }
+
+    def get_unidad_medida_info(self, obj):
+        return {
+            'id': obj.unidad_medida.id,
+            'codigo': obj.unidad_medida.codigo,
+            'nombre': obj.unidad_medida.nombre,
+            'simbolo': obj.unidad_medida.simbolo
+        }
+
     def get_materiales_count(self, obj):
         return obj.material_set.count()
 
     def get_materiales_disponibles(self, obj):
-        if obj.tipo_material == TipoMaterialChoices.ONU:
+        if obj.tipo_material.es_unico:
             return obj.material_set.filter(
-                estado_onu=EstadoMaterialONUChoices.DISPONIBLE
+                estado_onu__permite_asignacion=True
             ).count()
         else:
             return obj.material_set.filter(
-                estado_general=EstadoMaterialGeneralChoices.DISPONIBLE
+                estado_general__permite_consumo=True
             ).count()
-
-    def validate(self, data):
-        # Validaciones específicas por tipo de material
-        if data.get('tipo_material') == TipoMaterialChoices.ONU:
-            data['requiere_inspeccion_inicial'] = True
-            data['unidad_medida'] = UnidadMedidaChoices.PIEZA
-            data['cantidad_por_unidad'] = Decimal('1.00')
-
-        return data
 
     def create(self, validated_data):
         componentes_data = validated_data.pop('componentes_data', [])
@@ -243,46 +372,71 @@ class ModeloSerializer(serializers.ModelSerializer):
             )
 
 
-# ========== SERIALIZERS DE LOTES ==========
+# ========== SERIALIZERS DE LOTES ACTUALIZADOS ==========
 
 class LoteDetalleSerializer(serializers.ModelSerializer):
-    modelo_nombre = serializers.CharField(source='modelo.nombre', read_only=True)
-    marca_nombre = serializers.CharField(source='modelo.marca.nombre', read_only=True)
-    codigo_modelo = serializers.IntegerField(source='modelo.codigo_modelo', read_only=True)
-    tipo_material = serializers.CharField(source='modelo.tipo_material', read_only=True)
-    unidad_medida = serializers.CharField(source='modelo.unidad_medida', read_only=True)
+    modelo_info = serializers.SerializerMethodField()
     cantidad_recibida = serializers.ReadOnlyField()
     cantidad_pendiente = serializers.ReadOnlyField()
 
     class Meta:
         model = LoteDetalle
         fields = [
-            'id', 'modelo', 'modelo_nombre', 'marca_nombre', 'codigo_modelo',
-            'tipo_material', 'unidad_medida', 'cantidad',
+            'id', 'modelo', 'modelo_info', 'cantidad',
             'cantidad_recibida', 'cantidad_pendiente', 'created_at'
         ]
         read_only_fields = ['created_at']
 
+    def get_modelo_info(self, obj):
+        return {
+            'id': obj.modelo.id,
+            'nombre': obj.modelo.nombre,
+            'marca': obj.modelo.marca.nombre,
+            'codigo_modelo': obj.modelo.codigo_modelo,
+            'tipo_material': {
+                'codigo': obj.modelo.tipo_material.codigo,
+                'nombre': obj.modelo.tipo_material.nombre,
+                'es_unico': obj.modelo.tipo_material.es_unico
+            },
+            'unidad_medida': {
+                'codigo': obj.modelo.unidad_medida.codigo,
+                'nombre': obj.modelo.unidad_medida.nombre,
+                'simbolo': obj.modelo.unidad_medida.simbolo
+            }
+        }
+
 
 class EntregaParcialLoteSerializer(serializers.ModelSerializer):
+    estado_entrega_info = serializers.SerializerMethodField()
     created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
 
     class Meta:
         model = EntregaParcialLote
         fields = [
             'id', 'numero_entrega', 'fecha_entrega', 'cantidad_entregada',
-            'estado_entrega', 'observaciones', 'created_at', 'created_by', 'created_by_nombre'
+            'estado_entrega', 'estado_entrega_info', 'observaciones',
+            'created_at', 'created_by', 'created_by_nombre'
         ]
         read_only_fields = ['created_at']
 
+    def get_estado_entrega_info(self, obj):
+        return {
+            'id': obj.estado_entrega.id,
+            'codigo': obj.estado_entrega.codigo,
+            'nombre': obj.estado_entrega.nombre,
+            'color': obj.estado_entrega.color
+        }
+
 
 class LoteSerializer(serializers.ModelSerializer):
-    proveedor_nombre = serializers.CharField(source='proveedor.nombre_comercial', read_only=True)
-    almacen_destino_nombre = serializers.CharField(source='almacen_destino.nombre', read_only=True)
-    tipo_servicio_nombre = serializers.CharField(source='tipo_servicio.nombre', read_only=True)
-    tipo_ingreso_display = serializers.CharField(source='get_tipo_ingreso_display', read_only=True)
-    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
+    # Información completa de relaciones ForeignKey
+    proveedor_info = serializers.SerializerMethodField()
+    almacen_destino_info = serializers.SerializerMethodField()
+    tipo_servicio_info = serializers.SerializerMethodField()
+    tipo_ingreso_info = serializers.SerializerMethodField()
+    estado_info = serializers.SerializerMethodField()
 
+    # Detalles y entregas
     detalles = LoteDetalleSerializer(many=True, read_only=True)
     entregas_parciales = EntregaParcialLoteSerializer(many=True, read_only=True)
 
@@ -292,18 +446,19 @@ class LoteSerializer(serializers.ModelSerializer):
     cantidad_pendiente = serializers.ReadOnlyField()
     porcentaje_recibido = serializers.ReadOnlyField()
 
+    # Auditoría
     created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
 
     class Meta:
         model = Lote
         fields = [
-            'id', 'numero_lote', 'tipo_ingreso', 'tipo_ingreso_display',
-            'proveedor', 'proveedor_nombre',
-            'almacen_destino', 'almacen_destino_nombre',
-            'tipo_servicio', 'tipo_servicio_nombre',
+            'id', 'numero_lote', 'tipo_ingreso', 'tipo_ingreso_info',
+            'proveedor', 'proveedor_info',
+            'almacen_destino', 'almacen_destino_info',
+            'tipo_servicio', 'tipo_servicio_info',
             'codigo_requerimiento_compra', 'codigo_nota_ingreso',
             'fecha_recepcion', 'fecha_inicio_garantia', 'fecha_fin_garantia',
-            'estado', 'estado_display',
+            'estado', 'estado_info',
             'numero_informe', 'detalles_informe', 'fecha_informe',
             'total_entregas_parciales', 'observaciones',
             'detalles', 'entregas_parciales',
@@ -312,29 +467,41 @@ class LoteSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at']
 
-    def validate_codigo_requerimiento_compra(self, value):
-        if not (6 <= len(value) <= 10) or not value.isdigit():
-            raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
-        return value
+    def get_proveedor_info(self, obj):
+        return {
+            'id': obj.proveedor.id,
+            'codigo': obj.proveedor.codigo,
+            'nombre_comercial': obj.proveedor.nombre_comercial
+        }
 
-    def validate_codigo_nota_ingreso(self, value):
-        if not (6 <= len(value) <= 10) or not value.isdigit():
-            raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
-        return value
+    def get_almacen_destino_info(self, obj):
+        return {
+            'id': obj.almacen_destino.id,
+            'codigo': obj.almacen_destino.codigo,
+            'nombre': obj.almacen_destino.nombre
+        }
 
-    def validate(self, data):
-        # Validar fechas de garantía
-        if data.get('fecha_fin_garantia') and data.get('fecha_inicio_garantia'):
-            if data['fecha_fin_garantia'] <= data['fecha_inicio_garantia']:
-                raise serializers.ValidationError("La fecha de fin de garantía debe ser posterior al inicio")
+    def get_tipo_servicio_info(self, obj):
+        return {
+            'id': obj.tipo_servicio.id,
+            'nombre': obj.tipo_servicio.nombre
+        }
 
-        # Validar almacén destino para lotes nuevos
-        if data.get('tipo_ingreso') == TipoIngresoChoices.NUEVO:
-            almacen = data.get('almacen_destino')
-            if almacen and not almacen.es_principal:
-                raise serializers.ValidationError("Los lotes nuevos solo pueden ir al almacén principal")
+    def get_tipo_ingreso_info(self, obj):
+        return {
+            'id': obj.tipo_ingreso.id,
+            'codigo': obj.tipo_ingreso.codigo,
+            'nombre': obj.tipo_ingreso.nombre
+        }
 
-        return data
+    def get_estado_info(self, obj):
+        return {
+            'id': obj.estado.id,
+            'codigo': obj.estado.codigo,
+            'nombre': obj.estado.nombre,
+            'color': obj.estado.color,
+            'es_final': obj.estado.es_final
+        }
 
 
 class LoteCreateSerializer(serializers.ModelSerializer):
@@ -360,10 +527,32 @@ class LoteCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
         return value
 
+    def validate(self, data):
+        # Validar fechas de garantía
+        if data.get('fecha_fin_garantia') and data.get('fecha_inicio_garantia'):
+            if data['fecha_fin_garantia'] <= data['fecha_inicio_garantia']:
+                raise serializers.ValidationError("La fecha de fin de garantía debe ser posterior al inicio")
+
+        # Validar almacén destino para lotes nuevos
+        tipo_ingreso = data.get('tipo_ingreso')
+        if tipo_ingreso and tipo_ingreso.codigo == 'NUEVO':
+            almacen = data.get('almacen_destino')
+            if almacen and not almacen.es_principal:
+                raise serializers.ValidationError("Los lotes nuevos solo pueden ir al almacén principal")
+
+        return data
+
     def create(self, validated_data):
         detalles_data = validated_data.pop('detalles')
 
         with transaction.atomic():
+            # Asignar estado inicial al lote
+            try:
+                estado_registrado = EstadoLote.objects.get(codigo='REGISTRADO', activo=True)
+                validated_data['estado'] = estado_registrado
+            except EstadoLote.DoesNotExist:
+                pass
+
             lote = Lote.objects.create(**validated_data)
 
             for detalle_data in detalles_data:
@@ -378,15 +567,17 @@ class LoteCreateSerializer(serializers.ModelSerializer):
 # ========== SERIALIZERS DEL MODELO MATERIAL UNIFICADO ==========
 
 class MaterialSerializer(serializers.ModelSerializer):
-    modelo_nombre = serializers.CharField(source='modelo.nombre', read_only=True)
-    marca_nombre = serializers.CharField(source='modelo.marca.nombre', read_only=True)
-    tipo_equipo_nombre = serializers.CharField(source='tipo_equipo.nombre', read_only=True)
-    lote_numero = serializers.CharField(source='lote.numero_lote', read_only=True)
-    almacen_nombre = serializers.CharField(source='almacen_actual.nombre', read_only=True)
-    proveedor_nombre = serializers.CharField(source='lote.proveedor.nombre_comercial', read_only=True)
+    # Información completa de relaciones
+    modelo_info = serializers.SerializerMethodField()
+    tipo_equipo_info = serializers.SerializerMethodField()
+    tipo_material_info = serializers.SerializerMethodField()
+    lote_info = serializers.SerializerMethodField()
+    almacen_info = serializers.SerializerMethodField()
+    estado_onu_info = serializers.SerializerMethodField()
+    estado_general_info = serializers.SerializerMethodField()
+    tipo_origen_info = serializers.SerializerMethodField()
 
-    # Estados y displays
-    tipo_material_display = serializers.CharField(source='get_tipo_material_display', read_only=True)
+    # Estado unificado
     estado_display = serializers.ReadOnlyField()
 
     # Propiedades calculadas
@@ -397,16 +588,13 @@ class MaterialSerializer(serializers.ModelSerializer):
     class Meta:
         model = Material
         fields = [
-            'id', 'codigo_interno', 'tipo_material', 'tipo_material_display',
-            'modelo', 'modelo_nombre', 'marca_nombre',
-            'tipo_equipo', 'tipo_equipo_nombre',
-            'lote', 'lote_numero', 'proveedor_nombre',
+            'id', 'codigo_interno', 'tipo_material', 'tipo_material_info',
+            'modelo', 'modelo_info', 'tipo_equipo', 'tipo_equipo_info',
+            'lote', 'lote_info', 'almacen_actual', 'almacen_info',
             'mac_address', 'gpon_serial', 'serial_manufacturer',
-            'codigo_barras', 'especificaciones_tecnicas',
-            'codigo_item_equipo',
-            'almacen_actual', 'almacen_nombre',
-            'estado_onu', 'estado_general', 'estado_display',
-            'es_nuevo', 'tipo_origen',
+            'especificaciones_tecnicas', 'codigo_item_equipo',
+            'estado_onu', 'estado_onu_info', 'estado_general', 'estado_general_info',
+            'estado_display', 'es_nuevo', 'tipo_origen', 'tipo_origen_info',
             'fecha_envio_laboratorio', 'fecha_retorno_laboratorio',
             'cantidad', 'traspaso_actual', 'orden_trabajo',
             'requiere_laboratorio', 'puede_traspasar', 'dias_en_laboratorio',
@@ -414,8 +602,75 @@ class MaterialSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at', 'codigo_interno']
 
+    def get_modelo_info(self, obj):
+        return {
+            'id': obj.modelo.id,
+            'nombre': obj.modelo.nombre,
+            'marca': obj.modelo.marca.nombre,
+            'codigo_modelo': obj.modelo.codigo_modelo
+        }
+
+    def get_tipo_equipo_info(self, obj):
+        return {
+            'id': obj.tipo_equipo.id,
+            'nombre': obj.tipo_equipo.nombre
+        }
+
+    def get_tipo_material_info(self, obj):
+        return {
+            'id': obj.tipo_material.id,
+            'codigo': obj.tipo_material.codigo,
+            'nombre': obj.tipo_material.nombre,
+            'es_unico': obj.tipo_material.es_unico
+        }
+
+    def get_lote_info(self, obj):
+        return {
+            'id': obj.lote.id,
+            'numero_lote': obj.lote.numero_lote,
+            'proveedor': obj.lote.proveedor.nombre_comercial
+        }
+
+    def get_almacen_info(self, obj):
+        return {
+            'id': obj.almacen_actual.id,
+            'codigo': obj.almacen_actual.codigo,
+            'nombre': obj.almacen_actual.nombre
+        }
+
+    def get_estado_onu_info(self, obj):
+        if obj.estado_onu:
+            return {
+                'id': obj.estado_onu.id,
+                'codigo': obj.estado_onu.codigo,
+                'nombre': obj.estado_onu.nombre,
+                'color': obj.estado_onu.color,
+                'permite_asignacion': obj.estado_onu.permite_asignacion,
+                'permite_traspaso': obj.estado_onu.permite_traspaso
+            }
+        return None
+
+    def get_estado_general_info(self, obj):
+        if obj.estado_general:
+            return {
+                'id': obj.estado_general.id,
+                'codigo': obj.estado_general.codigo,
+                'nombre': obj.estado_general.nombre,
+                'color': obj.estado_general.color,
+                'permite_consumo': obj.estado_general.permite_consumo,
+                'permite_traspaso': obj.estado_general.permite_traspaso
+            }
+        return None
+
+    def get_tipo_origen_info(self, obj):
+        return {
+            'id': obj.tipo_origen.id,
+            'codigo': obj.tipo_origen.codigo,
+            'nombre': obj.tipo_origen.nombre
+        }
+
     def validate_mac_address(self, value):
-        """Validar MAC Address para equipos ONU"""
+        """Validar MAC Address para equipos únicos"""
         if value:
             value = value.upper().replace('-', ':')
             if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', value):
@@ -430,12 +685,12 @@ class MaterialSerializer(serializers.ModelSerializer):
     def validate(self, data):
         tipo_material = data.get('tipo_material') or (self.instance.tipo_material if self.instance else None)
 
-        # Validaciones específicas para equipos ONU
-        if tipo_material == TipoMaterialChoices.ONU:
+        # Validaciones específicas para equipos únicos
+        if tipo_material and tipo_material.es_unico:
             required_fields = ['mac_address', 'gpon_serial', 'serial_manufacturer']
             for field in required_fields:
                 if not data.get(field) and (not self.instance or not getattr(self.instance, field, None)):
-                    raise serializers.ValidationError(f"Los equipos ONU requieren {field}")
+                    raise serializers.ValidationError(f"Los equipos únicos requieren {field}")
 
         return data
 
@@ -443,6 +698,7 @@ class MaterialSerializer(serializers.ModelSerializer):
 class MaterialListSerializer(serializers.ModelSerializer):
     """Serializer optimizado para listados"""
     modelo_completo = serializers.SerializerMethodField()
+    tipo_material_info = serializers.SerializerMethodField()
     estado_display = serializers.ReadOnlyField()
     almacen_codigo = serializers.CharField(source='almacen_actual.codigo', read_only=True)
     lote_numero = serializers.CharField(source='lote.numero_lote', read_only=True)
@@ -450,166 +706,48 @@ class MaterialListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Material
         fields = [
-            'id', 'codigo_interno', 'tipo_material', 'modelo_completo',
-            'mac_address', 'gpon_serial', 'codigo_barras',
-            'almacen_codigo', 'lote_numero', 'estado_display',
-            'es_nuevo', 'cantidad', 'created_at'
+            'id', 'codigo_interno', 'tipo_material_info', 'modelo_completo',
+            'mac_address', 'gpon_serial', 'almacen_codigo', 'lote_numero',
+            'estado_display', 'es_nuevo', 'cantidad', 'created_at'
         ]
 
     def get_modelo_completo(self, obj):
         return f"{obj.modelo.marca.nombre} {obj.modelo.nombre}"
 
-
-# ========== SERIALIZERS DE IMPORTACIÓN MASIVA ==========
-
-class ImportacionMasivaSerializer(serializers.Serializer):
-    """Serializer para importación masiva desde Excel/CSV"""
-    archivo = serializers.FileField()
-    lote_id = serializers.IntegerField()
-    almacen_id = serializers.IntegerField()
-
-    def validate_archivo(self, value):
-        if not value.name.endswith(('.xlsx', '.xls', '.csv')):
-            raise serializers.ValidationError("Solo se permiten archivos Excel (.xlsx, .xls) o CSV")
-
-        if value.size > 5 * 1024 * 1024:  # 5MB
-            raise serializers.ValidationError("El archivo no puede ser mayor a 5MB")
-
-        return value
-
-    def validate_lote_id(self, value):
-        try:
-            lote = Lote.objects.get(id=value)
-            if lote.estado == EstadoLoteChoices.CERRADO:
-                raise serializers.ValidationError("No se puede importar a un lote cerrado")
-        except Lote.DoesNotExist:
-            raise serializers.ValidationError("El lote no existe")
-
-        return value
-
-    def validate_almacen_id(self, value):
-        try:
-            almacen = Almacen.objects.get(id=value, activo=True)
-        except Almacen.DoesNotExist:
-            raise serializers.ValidationError("El almacén no existe o no está activo")
-
-        return value
-
-    def procesar_importacion(self):
-        """Procesar el archivo de importación"""
-        archivo = self.validated_data['archivo']
-        lote_id = self.validated_data['lote_id']
-        almacen_id = self.validated_data['almacen_id']
-
-        try:
-            # Leer archivo según extensión
-            if archivo.name.endswith('.csv'):
-                df = pd.read_csv(BytesIO(archivo.read()))
-            else:
-                df = pd.read_excel(BytesIO(archivo.read()))
-
-            # Validar columnas requeridas
-            columnas_requeridas = ['MAC', 'GPON_SN', 'D_SN', 'ITEM_EQUIPO']
-            columnas_faltantes = set(columnas_requeridas) - set(df.columns)
-
-            if columnas_faltantes:
-                raise serializers.ValidationError(
-                    f"Faltan columnas requeridas: {', '.join(columnas_faltantes)}"
-                )
-
-            # Procesar datos
-            lote = Lote.objects.get(id=lote_id)
-            almacen = Almacen.objects.get(id=almacen_id)
-
-            materiales_creados = []
-            errores = []
-
-            for index, row in df.iterrows():
-                try:
-                    # Validaciones específicas
-                    mac = str(row['MAC']).strip().upper().replace('-', ':')
-                    gpon_sn = str(row['GPON_SN']).strip()
-                    d_sn = str(row['D_SN']).strip()
-                    item_equipo = str(row['ITEM_EQUIPO']).strip()
-
-                    # Validar MAC Address
-                    if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', mac):
-                        errores.append(f"Fila {index + 2}: MAC inválida '{row['MAC']}'")
-                        continue
-
-                    # Validar duplicados
-                    if Material.objects.filter(mac_address=mac).exists():
-                        errores.append(f"Fila {index + 2}: MAC ya existe '{mac}'")
-                        continue
-
-                    if Material.objects.filter(gpon_serial=gpon_sn).exists():
-                        errores.append(f"Fila {index + 2}: GPON Serial ya existe '{gpon_sn}'")
-                        continue
-
-                    if Material.objects.filter(serial_manufacturer=d_sn).exists():
-                        errores.append(f"Fila {index + 2}: D-SN ya existe '{d_sn}'")
-                        continue
-
-                    # Obtener modelo del lote (asumiendo que hay uno solo para simplicidad)
-                    # En implementación real, se debería mapear por código de modelo
-                    detalle = lote.detalles.first()
-                    if not detalle:
-                        errores.append(f"Fila {index + 2}: El lote no tiene modelos definidos")
-                        continue
-
-                    # Crear material
-                    material = Material.objects.create(
-                        tipo_material=TipoMaterialChoices.ONU,
-                        modelo=detalle.modelo,
-                        tipo_equipo=detalle.modelo.tipo_equipo,
-                        lote=lote,
-                        mac_address=mac,
-                        gpon_serial=gpon_sn,
-                        serial_manufacturer=d_sn,
-                        codigo_item_equipo=item_equipo,
-                        almacen_actual=almacen,
-                        es_nuevo=True if lote.tipo_ingreso == TipoIngresoChoices.NUEVO else False,
-                        tipo_origen=lote.tipo_ingreso,
-                        estado_onu=EstadoMaterialONUChoices.NUEVO if lote.tipo_ingreso == TipoIngresoChoices.NUEVO else EstadoMaterialONUChoices.DISPONIBLE
-                    )
-
-                    materiales_creados.append(material)
-
-                except Exception as e:
-                    errores.append(f"Fila {index + 2}: Error inesperado - {str(e)}")
-
-            return {
-                'materiales_creados': len(materiales_creados),
-                'errores': errores,
-                'total_filas': len(df),
-                'exitoso': len(errores) == 0
-            }
-
-        except Exception as e:
-            raise serializers.ValidationError(f"Error procesando archivo: {str(e)}")
+    def get_tipo_material_info(self, obj):
+        return {
+            'codigo': obj.tipo_material.codigo,
+            'nombre': obj.tipo_material.nombre,
+            'es_unico': obj.tipo_material.es_unico
+        }
 
 
-# ========== SERIALIZERS DE TRASPASOS ==========
+# ========== SERIALIZERS DE OPERACIONES ACTUALIZADOS ==========
 
 class TraspasoMaterialSerializer(serializers.ModelSerializer):
-    material_codigo = serializers.CharField(source='material.codigo_interno', read_only=True)
-    material_descripcion = serializers.SerializerMethodField()
+    material_info = serializers.SerializerMethodField()
 
     class Meta:
         model = TraspasoMaterial
-        fields = ['id', 'material', 'material_codigo', 'material_descripcion', 'recibido', 'observaciones']
+        fields = ['id', 'material', 'material_info', 'recibido', 'observaciones']
 
-    def get_material_descripcion(self, obj):
-        return f"{obj.material.modelo.nombre} - {obj.material.codigo_interno}"
+    def get_material_info(self, obj):
+        return {
+            'codigo_interno': obj.material.codigo_interno,
+            'descripcion': f"{obj.material.modelo.nombre} - {obj.material.codigo_interno}",
+            'tipo_material': obj.material.tipo_material.nombre
+        }
 
 
 class TraspasoAlmacenSerializer(serializers.ModelSerializer):
-    almacen_origen_nombre = serializers.CharField(source='almacen_origen.nombre', read_only=True)
-    almacen_destino_nombre = serializers.CharField(source='almacen_destino.nombre', read_only=True)
-    usuario_envio_nombre = serializers.CharField(source='usuario_envio.nombre_completo', read_only=True)
-    usuario_recepcion_nombre = serializers.CharField(source='usuario_recepcion.nombre_completo', read_only=True)
-    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
+    # Información completa de relaciones
+    almacen_origen_info = serializers.SerializerMethodField()
+    almacen_destino_info = serializers.SerializerMethodField()
+    estado_info = serializers.SerializerMethodField()
+    usuario_envio_info = serializers.SerializerMethodField()
+    usuario_recepcion_info = serializers.SerializerMethodField()
 
+    # Materiales y propiedades
     materiales = TraspasoMaterialSerializer(many=True, read_only=True)
     duracion_transito = serializers.ReadOnlyField()
     materiales_faltantes = serializers.ReadOnlyField()
@@ -618,18 +756,57 @@ class TraspasoAlmacenSerializer(serializers.ModelSerializer):
         model = TraspasoAlmacen
         fields = [
             'id', 'numero_traspaso', 'numero_solicitud',
-            'almacen_origen', 'almacen_origen_nombre',
-            'almacen_destino', 'almacen_destino_nombre',
+            'almacen_origen', 'almacen_origen_info',
+            'almacen_destino', 'almacen_destino_info',
             'fecha_envio', 'fecha_recepcion',
-            'estado', 'estado_display',
+            'estado', 'estado_info',
             'cantidad_enviada', 'cantidad_recibida', 'materiales_faltantes',
             'motivo', 'observaciones_envio', 'observaciones_recepcion',
-            'usuario_envio', 'usuario_envio_nombre',
-            'usuario_recepcion', 'usuario_recepcion_nombre',
+            'usuario_envio', 'usuario_envio_info',
+            'usuario_recepcion', 'usuario_recepcion_info',
             'materiales', 'duracion_transito',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['numero_traspaso', 'created_at', 'updated_at']
+
+    def get_almacen_origen_info(self, obj):
+        return {
+            'id': obj.almacen_origen.id,
+            'codigo': obj.almacen_origen.codigo,
+            'nombre': obj.almacen_origen.nombre
+        }
+
+    def get_almacen_destino_info(self, obj):
+        return {
+            'id': obj.almacen_destino.id,
+            'codigo': obj.almacen_destino.codigo,
+            'nombre': obj.almacen_destino.nombre
+        }
+
+    def get_estado_info(self, obj):
+        return {
+            'id': obj.estado.id,
+            'codigo': obj.estado.codigo,
+            'nombre': obj.estado.nombre,
+            'color': obj.estado.color,
+            'es_final': obj.estado.es_final
+        }
+
+    def get_usuario_envio_info(self, obj):
+        if obj.usuario_envio:
+            return {
+                'id': obj.usuario_envio.id,
+                'nombre_completo': obj.usuario_envio.nombre_completo
+            }
+        return None
+
+    def get_usuario_recepcion_info(self, obj):
+        if obj.usuario_recepcion:
+            return {
+                'id': obj.usuario_recepcion.id,
+                'nombre_completo': obj.usuario_recepcion.nombre_completo
+            }
+        return None
 
     def validate_numero_solicitud(self, value):
         if not (6 <= len(value) <= 10) or not value.isdigit():
@@ -681,6 +858,13 @@ class TraspasoCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
 
         with transaction.atomic():
+            # Buscar estado inicial
+            try:
+                estado_pendiente = EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+                validated_data['estado'] = estado_pendiente
+            except EstadoTraspaso.DoesNotExist:
+                pass
+
             # Crear traspaso
             traspaso = TraspasoAlmacen.objects.create(
                 **validated_data,
@@ -707,44 +891,82 @@ class TraspasoCreateSerializer(serializers.ModelSerializer):
         return TraspasoAlmacenSerializer(instance).data
 
 
-# ========== SERIALIZERS DE DEVOLUCIONES ==========
+# ========== SERIALIZERS DE DEVOLUCIONES ACTUALIZADOS ==========
 
 class DevolucionMaterialSerializer(serializers.ModelSerializer):
-    material_codigo = serializers.CharField(source='material.codigo_interno', read_only=True)
-    material_descripcion = serializers.SerializerMethodField()
+    material_info = serializers.SerializerMethodField()
 
     class Meta:
         model = DevolucionMaterial
-        fields = ['id', 'material', 'material_codigo', 'material_descripcion', 'motivo_especifico']
+        fields = ['id', 'material', 'material_info', 'motivo_especifico']
 
-    def get_material_descripcion(self, obj):
-        return f"{obj.material.modelo.nombre} - {obj.material.codigo_interno}"
+    def get_material_info(self, obj):
+        return {
+            'codigo_interno': obj.material.codigo_interno,
+            'descripcion': f"{obj.material.modelo.nombre} - {obj.material.codigo_interno}",
+            'tipo_material': obj.material.tipo_material.nombre
+        }
 
 
 class DevolucionProveedorSerializer(serializers.ModelSerializer):
-    lote_numero = serializers.CharField(source='lote_origen.numero_lote', read_only=True)
-    proveedor_nombre = serializers.CharField(source='proveedor.nombre_comercial', read_only=True)
-    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
-    respuesta_proveedor_display = serializers.CharField(source='get_respuesta_proveedor_display', read_only=True)
-    created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
+    # Información completa de relaciones
+    lote_info = serializers.SerializerMethodField()
+    proveedor_info = serializers.SerializerMethodField()
+    estado_info = serializers.SerializerMethodField()
+    respuesta_proveedor_info = serializers.SerializerMethodField()
+    created_by_info = serializers.SerializerMethodField()
 
+    # Materiales y propiedades
     materiales_devueltos = DevolucionMaterialSerializer(many=True, read_only=True)
     cantidad_materiales = serializers.ReadOnlyField()
 
     class Meta:
         model = DevolucionProveedor
         fields = [
-            'id', 'numero_devolucion', 'lote_origen', 'lote_numero',
-            'proveedor', 'proveedor_nombre',
-            'motivo', 'numero_informe_laboratorio',
-            'estado', 'estado_display',
-            'fecha_creacion', 'fecha_envio', 'fecha_confirmacion',
-            'respuesta_proveedor', 'respuesta_proveedor_display',
-            'observaciones_proveedor',
+            'id', 'numero_devolucion', 'lote_origen', 'lote_info',
+            'proveedor', 'proveedor_info', 'motivo', 'numero_informe_laboratorio',
+            'estado', 'estado_info', 'fecha_creacion', 'fecha_envio', 'fecha_confirmacion',
+            'respuesta_proveedor', 'respuesta_proveedor_info', 'observaciones_proveedor',
             'materiales_devueltos', 'cantidad_materiales',
-            'created_by', 'created_by_nombre', 'updated_at'
+            'created_by', 'created_by_info', 'updated_at'
         ]
         read_only_fields = ['numero_devolucion', 'fecha_creacion', 'updated_at']
+
+    def get_lote_info(self, obj):
+        return {
+            'id': obj.lote_origen.id,
+            'numero_lote': obj.lote_origen.numero_lote
+        }
+
+    def get_proveedor_info(self, obj):
+        return {
+            'id': obj.proveedor.id,
+            'nombre_comercial': obj.proveedor.nombre_comercial
+        }
+
+    def get_estado_info(self, obj):
+        return {
+            'id': obj.estado.id,
+            'codigo': obj.estado.codigo,
+            'nombre': obj.estado.nombre,
+            'color': obj.estado.color,
+            'es_final': obj.estado.es_final
+        }
+
+    def get_respuesta_proveedor_info(self, obj):
+        if obj.respuesta_proveedor:
+            return {
+                'id': obj.respuesta_proveedor.id,
+                'codigo': obj.respuesta_proveedor.codigo,
+                'nombre': obj.respuesta_proveedor.nombre
+            }
+        return None
+
+    def get_created_by_info(self, obj):
+        return {
+            'id': obj.created_by.id,
+            'nombre_completo': obj.created_by.nombre_completo
+        }
 
 
 class DevolucionCreateSerializer(serializers.ModelSerializer):
@@ -772,13 +994,15 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Algunos materiales no existen")
 
         for material in materiales:
-            if material.tipo_material == TipoMaterialChoices.ONU:
-                if material.estado_onu != EstadoMaterialONUChoices.DEFECTUOSO:
+            if material.tipo_material.es_unico:
+                # Para equipos únicos, verificar estado defectuoso
+                if not material.estado_onu or material.estado_onu.codigo != 'DEFECTUOSO':
                     raise serializers.ValidationError(
                         f"El material {material.codigo_interno} debe estar defectuoso para devolverlo"
                     )
             else:
-                if material.estado_general != EstadoMaterialGeneralChoices.DEFECTUOSO:
+                # Para materiales generales, verificar estado defectuoso
+                if not material.estado_general or material.estado_general.codigo != 'DEFECTUOSO':
                     raise serializers.ValidationError(
                         f"El material {material.codigo_interno} debe estar defectuoso para devolverlo"
                     )
@@ -808,6 +1032,13 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
 
         with transaction.atomic():
+            # Buscar estado inicial
+            try:
+                estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
+                validated_data['estado'] = estado_pendiente
+            except EstadoDevolucion.DoesNotExist:
+                pass
+
             # Crear devolución
             devolucion = DevolucionProveedor.objects.create(
                 **validated_data,
@@ -824,10 +1055,19 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
                 )
 
                 # Actualizar estado del material
-                if material.tipo_material == TipoMaterialChoices.ONU:
-                    material.estado_onu = EstadoMaterialONUChoices.DEVUELTO_PROVEEDOR
+                if material.tipo_material.es_unico:
+                    try:
+                        estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_PROVEEDOR', activo=True)
+                        material.estado_onu = estado_devuelto
+                    except EstadoMaterialONU.DoesNotExist:
+                        pass
                 else:
-                    material.estado_general = EstadoMaterialGeneralChoices.DADO_DE_BAJA
+                    try:
+                        estado_baja = EstadoMaterialGeneral.objects.get(codigo='DADO_DE_BAJA', activo=True)
+                        material.estado_general = estado_baja
+                    except EstadoMaterialGeneral.DoesNotExist:
+                        pass
+
                 material.save()
 
         return devolucion
@@ -839,91 +1079,132 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
 # ========== SERIALIZERS DE HISTORIAL ==========
 
 class HistorialMaterialSerializer(serializers.ModelSerializer):
-    material_codigo = serializers.CharField(source='material.codigo_interno', read_only=True)
-    almacen_anterior_nombre = serializers.CharField(source='almacen_anterior.nombre', read_only=True)
-    almacen_nuevo_nombre = serializers.CharField(source='almacen_nuevo.nombre', read_only=True)
-    usuario_nombre = serializers.CharField(source='usuario_responsable.nombre_completo', read_only=True)
-    traspaso_numero = serializers.CharField(source='traspaso_relacionado.numero_traspaso', read_only=True)
-    devolucion_numero = serializers.CharField(source='devolucion_relacionada.numero_devolucion', read_only=True)
+    material_info = serializers.SerializerMethodField()
+    almacen_anterior_info = serializers.SerializerMethodField()
+    almacen_nuevo_info = serializers.SerializerMethodField()
+    usuario_info = serializers.SerializerMethodField()
+    traspaso_info = serializers.SerializerMethodField()
+    devolucion_info = serializers.SerializerMethodField()
 
     class Meta:
         model = HistorialMaterial
         fields = [
-            'id', 'material', 'material_codigo',
+            'id', 'material', 'material_info',
             'estado_anterior', 'estado_nuevo',
-            'almacen_anterior', 'almacen_anterior_nombre',
-            'almacen_nuevo', 'almacen_nuevo_nombre',
+            'almacen_anterior', 'almacen_anterior_info',
+            'almacen_nuevo', 'almacen_nuevo_info',
             'motivo', 'observaciones',
-            'traspaso_relacionado', 'traspaso_numero',
-            'devolucion_relacionada', 'devolucion_numero',
-            'fecha_cambio', 'usuario_responsable', 'usuario_nombre'
+            'traspaso_relacionado', 'traspaso_info',
+            'devolucion_relacionada', 'devolucion_info',
+            'fecha_cambio', 'usuario_responsable', 'usuario_info'
         ]
+
+    def get_material_info(self, obj):
+        return {
+            'codigo_interno': obj.material.codigo_interno
+        }
+
+    def get_almacen_anterior_info(self, obj):
+        if obj.almacen_anterior:
+            return {
+                'codigo': obj.almacen_anterior.codigo,
+                'nombre': obj.almacen_anterior.nombre
+            }
+        return None
+
+    def get_almacen_nuevo_info(self, obj):
+        return {
+            'codigo': obj.almacen_nuevo.codigo,
+            'nombre': obj.almacen_nuevo.nombre
+        }
+
+    def get_usuario_info(self, obj):
+        return {
+            'nombre_completo': obj.usuario_responsable.nombre_completo
+        }
+
+    def get_traspaso_info(self, obj):
+        if obj.traspaso_relacionado:
+            return {
+                'numero_traspaso': obj.traspaso_relacionado.numero_traspaso
+            }
+        return None
+
+    def get_devolucion_info(self, obj):
+        if obj.devolucion_relacionada:
+            return {
+                'numero_devolucion': obj.devolucion_relacionada.numero_devolucion
+            }
+        return None
 
 
 # ========== SERIALIZERS PARA COMPATIBILIDAD ==========
 
 class EquipoONUSerializer(serializers.ModelSerializer):
     """Serializer de compatibilidad para el modelo existente"""
-    modelo_nombre = serializers.CharField(source='modelo.nombre', read_only=True)
-    marca_nombre = serializers.CharField(source='modelo.marca.nombre', read_only=True)
-    tipo_equipo_nombre = serializers.CharField(source='tipo_equipo.nombre', read_only=True)
-    estado_nombre = serializers.CharField(source='estado.nombre', read_only=True)
-    lote_numero = serializers.CharField(source='lote.numero_lote', read_only=True)
+    modelo_info = serializers.SerializerMethodField()
+    tipo_equipo_info = serializers.SerializerMethodField()
+    estado_info = serializers.SerializerMethodField()
+    lote_info = serializers.SerializerMethodField()
 
     class Meta:
         model = EquipoONU
         fields = [
-            'id', 'codigo_interno', 'modelo', 'modelo_nombre', 'marca_nombre',
-            'tipo_equipo', 'tipo_equipo_nombre', 'lote', 'lote_numero',
+            'id', 'codigo_interno', 'modelo', 'modelo_info',
+            'tipo_equipo', 'tipo_equipo_info', 'lote', 'lote_info',
             'mac_address', 'gpon_serial', 'serial_manufacturer',
-            'fecha_ingreso', 'estado', 'estado_nombre',
+            'fecha_ingreso', 'estado', 'estado_info',
             'observaciones', 'created_at', 'updated_at'
         ]
         read_only_fields = ['fecha_ingreso', 'created_at', 'updated_at']
 
+    def get_modelo_info(self, obj):
+        return {
+            'nombre': obj.modelo.nombre,
+            'marca': obj.modelo.marca.nombre
+        }
+
+    def get_tipo_equipo_info(self, obj):
+        return {
+            'nombre': obj.tipo_equipo.nombre
+        }
+
+    def get_estado_info(self, obj):
+        if obj.estado:
+            return {
+                'nombre': obj.estado.nombre
+            }
+        return None
+
+    def get_lote_info(self, obj):
+        return {
+            'numero_lote': obj.lote.numero_lote
+        }
+
 
 class EquipoServicioSerializer(serializers.ModelSerializer):
     """Serializer de compatibilidad para relaciones con contratos"""
-    equipo_codigo = serializers.CharField(source='equipo_onu.codigo_interno', read_only=True)
-    contrato_numero = serializers.CharField(source='contrato.numero_contrato', read_only=True)
+    equipo_info = serializers.SerializerMethodField()
+    contrato_info = serializers.SerializerMethodField()
 
     class Meta:
         model = EquipoServicio
         fields = [
-            'id', 'equipo_onu', 'equipo_codigo', 'contrato', 'contrato_numero',
+            'id', 'equipo_onu', 'equipo_info', 'contrato', 'contrato_info',
             'servicio', 'fecha_asignacion', 'fecha_desasignacion',
             'estado_asignacion', 'observaciones', 'created_at', 'updated_at'
         ]
         read_only_fields = ['fecha_asignacion', 'created_at', 'updated_at']
 
+    def get_equipo_info(self, obj):
+        return {
+            'codigo_interno': obj.equipo_onu.codigo_interno
+        }
 
-# ========== SERIALIZERS DE ESTADÍSTICAS Y REPORTES ==========
-
-class EstadisticasAlmacenSerializer(serializers.Serializer):
-    """Serializer para estadísticas de almacenes"""
-    almacen_id = serializers.IntegerField()
-    almacen_nombre = serializers.CharField()
-    total_materiales = serializers.IntegerField()
-    materiales_disponibles = serializers.IntegerField()
-    materiales_reservados = serializers.IntegerField()
-    materiales_en_transito = serializers.IntegerField()
-    materiales_defectuosos = serializers.IntegerField()
-    por_tipo_material = serializers.DictField()
-
-
-class EstadisticasGeneralesSerializer(serializers.Serializer):
-    """Serializer para estadísticas generales del sistema"""
-    total_almacenes = serializers.IntegerField()
-    total_proveedores = serializers.IntegerField()
-    total_lotes = serializers.IntegerField()
-    total_materiales = serializers.IntegerField()
-    lotes_activos = serializers.IntegerField()
-    traspasos_pendientes = serializers.IntegerField()
-    materiales_en_laboratorio = serializers.IntegerField()
-    devoluciones_pendientes = serializers.IntegerField()
-    por_almacen = EstadisticasAlmacenSerializer(many=True)
-    top_proveedores = serializers.ListField()
-    materiales_proximos_vencer = serializers.IntegerField()
+    def get_contrato_info(self, obj):
+        return {
+            'numero_contrato': obj.contrato.numero_contrato
+        }
 
 
 # ========== SERIALIZERS DE OPERACIONES ESPECIALES ==========
@@ -950,13 +1231,13 @@ class LaboratorioOperacionSerializer(serializers.Serializer):
         accion = data['accion']
 
         if accion == 'enviar':
-            if not material.requiere_laboratorio and material.tipo_material == TipoMaterialChoices.ONU:
-                if material.estado_onu == EstadoMaterialONUChoices.EN_LABORATORIO:
+            if not material.requiere_laboratorio and material.tipo_material.es_unico:
+                if material.estado_onu and material.estado_onu.codigo == 'EN_LABORATORIO':
                     raise serializers.ValidationError("El material ya está en laboratorio")
 
         elif accion == 'retornar':
-            if material.tipo_material == TipoMaterialChoices.ONU:
-                if material.estado_onu != EstadoMaterialONUChoices.EN_LABORATORIO:
+            if material.tipo_material.es_unico:
+                if not material.estado_onu or material.estado_onu.codigo != 'EN_LABORATORIO':
                     raise serializers.ValidationError("El material no está en laboratorio")
 
             if not data.get('numero_informe'):
@@ -985,7 +1266,7 @@ class LaboratorioOperacionSerializer(serializers.Serializer):
 class CambioEstadoMaterialSerializer(serializers.Serializer):
     """Serializer para cambios de estado de materiales"""
     material_id = serializers.IntegerField()
-    nuevo_estado = serializers.CharField()
+    nuevo_estado_id = serializers.IntegerField()
     motivo = serializers.CharField()
     observaciones = serializers.CharField(required=False, allow_blank=True)
 
@@ -999,34 +1280,40 @@ class CambioEstadoMaterialSerializer(serializers.Serializer):
 
     def validate(self, data):
         material = Material.objects.get(id=data['material_id'])
-        nuevo_estado = data['nuevo_estado']
+        nuevo_estado_id = data['nuevo_estado_id']
 
         # Validar que el nuevo estado sea válido para el tipo de material
-        if material.tipo_material == TipoMaterialChoices.ONU:
-            estados_validos = [choice[0] for choice in EstadoMaterialONUChoices.choices]
-            if nuevo_estado not in estados_validos:
-                raise serializers.ValidationError(f"Estado inválido para equipo ONU: {nuevo_estado}")
+        if material.tipo_material.es_unico:
+            try:
+                EstadoMaterialONU.objects.get(id=nuevo_estado_id, activo=True)
+            except EstadoMaterialONU.DoesNotExist:
+                raise serializers.ValidationError("Estado inválido para equipo único")
         else:
-            estados_validos = [choice[0] for choice in EstadoMaterialGeneralChoices.choices]
-            if nuevo_estado not in estados_validos:
-                raise serializers.ValidationError(f"Estado inválido para este material: {nuevo_estado}")
+            try:
+                EstadoMaterialGeneral.objects.get(id=nuevo_estado_id, activo=True)
+            except EstadoMaterialGeneral.DoesNotExist:
+                raise serializers.ValidationError("Estado inválido para este material")
 
         return data
 
     def ejecutar_cambio(self):
         """Ejecutar el cambio de estado"""
         material = Material.objects.get(id=self.validated_data['material_id'])
-        nuevo_estado = self.validated_data['nuevo_estado']
+        nuevo_estado_id = self.validated_data['nuevo_estado_id']
         motivo = self.validated_data['motivo']
         observaciones = self.validated_data.get('observaciones', '')
 
         # Guardar estado anterior
-        if material.tipo_material == TipoMaterialChoices.ONU:
-            estado_anterior = material.estado_onu
+        if material.tipo_material.es_unico:
+            estado_anterior = material.estado_onu.nombre if material.estado_onu else 'Sin estado'
+            nuevo_estado = EstadoMaterialONU.objects.get(id=nuevo_estado_id)
             material.estado_onu = nuevo_estado
+            estado_nuevo = nuevo_estado.nombre
         else:
-            estado_anterior = material.estado_general
+            estado_anterior = material.estado_general.nombre if material.estado_general else 'Sin estado'
+            nuevo_estado = EstadoMaterialGeneral.objects.get(id=nuevo_estado_id)
             material.estado_general = nuevo_estado
+            estado_nuevo = nuevo_estado.nombre
 
         material.save()
 
@@ -1034,7 +1321,7 @@ class CambioEstadoMaterialSerializer(serializers.Serializer):
         HistorialMaterial.objects.create(
             material=material,
             estado_anterior=estado_anterior,
-            estado_nuevo=nuevo_estado,
+            estado_nuevo=estado_nuevo,
             almacen_anterior=material.almacen_actual,
             almacen_nuevo=material.almacen_actual,
             motivo=motivo,
@@ -1043,3 +1330,55 @@ class CambioEstadoMaterialSerializer(serializers.Serializer):
         )
 
         return material
+
+
+# ========== SERIALIZERS PARA ENDPOINTS ESPECIALES ==========
+
+class ListaOpcionesSerializer(serializers.Serializer):
+    """Serializer para endpoints que devuelven listas de opciones para React"""
+
+    def to_representation(self, instance):
+        return {
+            'tipos_ingreso': TipoIngresoSerializer(
+                TipoIngreso.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'estados_lote': EstadoLoteSerializer(
+                EstadoLote.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'estados_traspaso': EstadoTraspasoSerializer(
+                EstadoTraspaso.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'tipos_material': TipoMaterialSerializer(
+                TipoMaterial.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'unidades_medida': UnidadMedidaSerializer(
+                UnidadMedida.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'estados_material_onu': EstadoMaterialONUSerializer(
+                EstadoMaterialONU.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'estados_material_general': EstadoMaterialGeneralSerializer(
+                EstadoMaterialGeneral.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'tipos_almacen': TipoAlmacenSerializer(
+                TipoAlmacen.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'estados_devolucion': EstadoDevolucionSerializer(
+                EstadoDevolucion.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'respuestas_proveedor': RespuestaProveedorSerializer(
+                RespuestaProveedor.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'marcas': MarcaSerializer(
+                Marca.objects.filter(activo=True).order_by('nombre'), many=True
+            ).data,
+            'tipos_equipo': TipoEquipoSerializer(
+                TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
+            ).data,
+            'almacenes': AlmacenSerializer(
+                Almacen.objects.filter(activo=True).order_by('codigo'), many=True
+            ).data,
+            'proveedores': ProveedorSerializer(
+                Proveedor.objects.filter(activo=True).order_by('nombre_comercial'), many=True
+            ).data
+        }

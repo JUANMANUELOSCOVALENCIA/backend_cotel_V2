@@ -1,5 +1,5 @@
 # ======================================================
-# almacenes/views/operacion_views.py
+# almacenes/views/operacion_views.py - ACTUALIZADO SIN TEXTCHOICES
 # Views para traspasos y devoluciones
 # ======================================================
 
@@ -14,9 +14,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     TraspasoAlmacen, TraspasoMaterial, DevolucionProveedor, DevolucionMaterial,
-    Material, EstadoTraspasoChoices, EstadoDevolucionChoices,
-    RespuestaProveedorChoices, TipoMaterialChoices,
-    EstadoMaterialONUChoices, EstadoMaterialGeneralChoices
+    Material,
+    # Modelos de choices (antes TextChoices)
+    EstadoTraspaso, EstadoDevolucion, RespuestaProveedor, TipoMaterial,
+    EstadoMaterialONU, EstadoMaterialGeneral
 )
 from ..serializers import (
     TraspasoAlmacenSerializer, TraspasoCreateSerializer, TraspasoMaterialSerializer,
@@ -27,7 +28,7 @@ from ..serializers import (
 class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión completa de traspasos entre almacenes"""
     queryset = TraspasoAlmacen.objects.all().select_related(
-        'almacen_origen', 'almacen_destino', 'usuario_envio', 'usuario_recepcion'
+        'almacen_origen', 'almacen_destino', 'usuario_envio', 'usuario_recepcion', 'estado'
     ).prefetch_related('materiales__material')
     permission_classes = [IsAuthenticated, GenericRolePermission]
     basename = 'traspasos'
@@ -52,12 +53,20 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         # Filtro por traspasos pendientes
         pendientes = self.request.query_params.get('pendientes')
         if pendientes == 'true':
-            queryset = queryset.filter(estado=EstadoTraspasoChoices.PENDIENTE)
+            try:
+                estado_pendiente = EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+                queryset = queryset.filter(estado=estado_pendiente)
+            except EstadoTraspaso.DoesNotExist:
+                queryset = queryset.none()
 
         # Filtro por traspasos en tránsito
         en_transito = self.request.query_params.get('en_transito')
         if en_transito == 'true':
-            queryset = queryset.filter(estado=EstadoTraspasoChoices.EN_TRANSITO)
+            try:
+                estado_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+                queryset = queryset.filter(estado=estado_transito)
+            except EstadoTraspaso.DoesNotExist:
+                queryset = queryset.none()
 
         # Filtros de fecha
         fecha_desde = self.request.query_params.get('fecha_desde')
@@ -75,7 +84,16 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         """Confirmar envío del traspaso"""
         traspaso = self.get_object()
 
-        if traspaso.estado != EstadoTraspasoChoices.PENDIENTE:
+        try:
+            estado_pendiente = EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+            estado_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+        except EstadoTraspaso.DoesNotExist:
+            return Response(
+                {'error': 'Estados de traspaso no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if traspaso.estado != estado_pendiente:
             return Response(
                 {'error': 'Solo se pueden enviar traspasos pendientes'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -85,7 +103,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             # Actualizar traspaso
-            traspaso.estado = EstadoTraspasoChoices.EN_TRANSITO
+            traspaso.estado = estado_transito
             traspaso.fecha_envio = timezone.now()
             traspaso.observaciones_envio = observaciones
             traspaso.usuario_envio = request.user
@@ -99,7 +117,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
 
         return Response({
             'message': f'Traspaso {traspaso.numero_traspaso} enviado correctamente',
-            'estado': traspaso.get_estado_display(),
+            'estado': traspaso.estado.nombre if traspaso.estado else 'Sin estado',
             'fecha_envio': traspaso.fecha_envio
         })
 
@@ -108,7 +126,16 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         """Confirmar recepción del traspaso"""
         traspaso = self.get_object()
 
-        if traspaso.estado != EstadoTraspasoChoices.EN_TRANSITO:
+        try:
+            estado_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+            estado_recibido = EstadoTraspaso.objects.get(codigo='RECIBIDO', activo=True)
+        except EstadoTraspaso.DoesNotExist:
+            return Response(
+                {'error': 'Estados de traspaso no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if traspaso.estado != estado_transito:
             return Response(
                 {'error': 'Solo se pueden recibir traspasos en tránsito'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -130,7 +157,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
             traspaso.fecha_recepcion = timezone.now()
             traspaso.observaciones_recepcion = observaciones
             traspaso.usuario_recepcion = request.user
-            traspaso.estado = EstadoTraspasoChoices.RECIBIDO
+            traspaso.estado = estado_recibido
             traspaso.save()
 
             # Actualizar materiales recibidos
@@ -159,7 +186,17 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         """Cancelar traspaso"""
         traspaso = self.get_object()
 
-        if traspaso.estado not in [EstadoTraspasoChoices.PENDIENTE, EstadoTraspasoChoices.EN_TRANSITO]:
+        try:
+            estado_pendiente = EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+            estado_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+            estado_cancelado = EstadoTraspaso.objects.get(codigo='CANCELADO', activo=True)
+        except EstadoTraspaso.DoesNotExist:
+            return Response(
+                {'error': 'Estados de traspaso no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if traspaso.estado not in [estado_pendiente, estado_transito]:
             return Response(
                 {'error': 'Solo se pueden cancelar traspasos pendientes o en tránsito'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -169,13 +206,13 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             # Liberar materiales si estaba en tránsito
-            if traspaso.estado == EstadoTraspasoChoices.EN_TRANSITO:
+            if traspaso.estado == estado_transito:
                 for traspaso_material in traspaso.materiales.all():
                     material = traspaso_material.material
                     material.traspaso_actual = None
                     material.save()
 
-            traspaso.estado = EstadoTraspasoChoices.CANCELADO
+            traspaso.estado = estado_cancelado
             traspaso.observaciones_envio += f"\n[CANCELADO] {motivo_cancelacion}"
             traspaso.save()
 
@@ -193,19 +230,19 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         serializer = TraspasoMaterialSerializer(materiales, many=True)
         return Response({
             'traspaso': traspaso.numero_traspaso,
-            'estado': traspaso.get_estado_display(),
+            'estado': traspaso.estado.nombre if traspaso.estado else 'Sin estado',
             'materiales': serializer.data
         })
 
     @action(detail=False, methods=['get'])
     def estadisticas(self, request):
         """Estadísticas de traspasos"""
-        # Por estado
+        # Por estado usando el nuevo modelo
         por_estado = {}
-        for estado_choice in EstadoTraspasoChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = TraspasoAlmacen.objects.filter(estado=estado_codigo).count()
-            por_estado[estado_nombre] = count
+        estados = EstadoTraspaso.objects.filter(activo=True)
+        for estado in estados:
+            count = TraspasoAlmacen.objects.filter(estado=estado).count()
+            por_estado[estado.nombre] = count
 
         # Traspasos por almacén (como origen)
         from django.db.models import Count
@@ -223,10 +260,14 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         ).order_by('-total_recibidos')[:10]
 
         # Tiempo promedio de tránsito
-        traspasos_completados = TraspasoAlmacen.objects.filter(
-            estado=EstadoTraspasoChoices.RECIBIDO,
-            fecha_recepcion__isnull=False
-        )
+        try:
+            estado_recibido = EstadoTraspaso.objects.get(codigo='RECIBIDO', activo=True)
+            traspasos_completados = TraspasoAlmacen.objects.filter(
+                estado=estado_recibido,
+                fecha_recepcion__isnull=False
+            )
+        except EstadoTraspaso.DoesNotExist:
+            traspasos_completados = TraspasoAlmacen.objects.none()
 
         if traspasos_completados.exists():
             from django.db.models import Avg
@@ -239,25 +280,33 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         else:
             tiempo_promedio_dias = 0
 
+        # Contadores por estado específico
+        try:
+            pendientes = TraspasoAlmacen.objects.filter(
+                estado=EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+            ).count()
+            en_transito = TraspasoAlmacen.objects.filter(
+                estado=EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
+            ).count()
+        except EstadoTraspaso.DoesNotExist:
+            pendientes = 0
+            en_transito = 0
+
         return Response({
             'total_traspasos': TraspasoAlmacen.objects.count(),
             'por_estado': por_estado,
             'por_almacen_origen': list(por_almacen_origen),
             'por_almacen_destino': list(por_almacen_destino),
             'tiempo_promedio_dias': tiempo_promedio_dias,
-            'pendientes': TraspasoAlmacen.objects.filter(
-                estado=EstadoTraspasoChoices.PENDIENTE
-            ).count(),
-            'en_transito': TraspasoAlmacen.objects.filter(
-                estado=EstadoTraspasoChoices.EN_TRANSITO
-            ).count()
+            'pendientes': pendientes,
+            'en_transito': en_transito
         })
 
 
 class DevolucionProveedorViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de devoluciones a proveedores"""
     queryset = DevolucionProveedor.objects.all().select_related(
-        'lote_origen__proveedor', 'proveedor', 'created_by'
+        'lote_origen__proveedor', 'proveedor', 'created_by', 'estado', 'respuesta_proveedor'
     ).prefetch_related('materiales_devueltos__material')
     permission_classes = [IsAuthenticated, GenericRolePermission]
     basename = 'devoluciones'
@@ -283,24 +332,35 @@ class DevolucionProveedorViewSet(viewsets.ModelViewSet):
         """Marcar devolución como enviada al proveedor"""
         devolucion = self.get_object()
 
-        if devolucion.estado != EstadoDevolucionChoices.PENDIENTE:
+        try:
+            estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
+            estado_enviado = EstadoDevolucion.objects.get(codigo='ENVIADO', activo=True)
+            estado_devuelto_onu = EstadoMaterialONU.objects.get(codigo='DEVUELTO_PROVEEDOR', activo=True)
+            estado_baja_general = EstadoMaterialGeneral.objects.get(codigo='DADO_DE_BAJA', activo=True)
+        except (EstadoDevolucion.DoesNotExist, EstadoMaterialONU.DoesNotExist, EstadoMaterialGeneral.DoesNotExist):
+            return Response(
+                {'error': 'Estados no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if devolucion.estado != estado_pendiente:
             return Response(
                 {'error': 'Solo se pueden enviar devoluciones pendientes'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         with transaction.atomic():
-            devolucion.estado = EstadoDevolucionChoices.ENVIADO
+            devolucion.estado = estado_enviado
             devolucion.fecha_envio = timezone.now()
             devolucion.save()
 
             # Actualizar estado de materiales devueltos
             for devolucion_material in devolucion.materiales_devueltos.all():
                 material = devolucion_material.material
-                if material.tipo_material == TipoMaterialChoices.ONU:
-                    material.estado_onu = EstadoMaterialONUChoices.DEVUELTO_PROVEEDOR
+                if material.tipo_material.es_unico:
+                    material.estado_onu = estado_devuelto_onu
                 else:
-                    material.estado_general = EstadoMaterialGeneralChoices.DADO_DE_BAJA
+                    material.estado_general = estado_baja_general
                 material.save()
 
         return Response({
@@ -313,101 +373,39 @@ class DevolucionProveedorViewSet(viewsets.ModelViewSet):
         """Confirmar respuesta del proveedor"""
         devolucion = self.get_object()
 
-        if devolucion.estado != EstadoDevolucionChoices.ENVIADO:
+        try:
+            estado_enviado = EstadoDevolucion.objects.get(codigo='ENVIADO', activo=True)
+            estado_confirmado = EstadoDevolucion.objects.get(codigo='CONFIRMADO', activo=True)
+        except EstadoDevolucion.DoesNotExist:
+            return Response(
+                {'error': 'Estados de devolución no configurados correctamente'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if devolucion.estado != estado_enviado:
             return Response(
                 {'error': 'Solo se puede confirmar respuesta de devoluciones enviadas'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        respuesta = request.data.get('respuesta_proveedor')
+        respuesta_id = request.data.get('respuesta_proveedor_id')
         observaciones = request.data.get('observaciones_proveedor', '')
 
-        if respuesta not in [choice[0] for choice in RespuestaProveedorChoices.choices]:
+        if not respuesta_id:
+            return Response(
+                {'error': 'ID de respuesta del proveedor requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            respuesta = RespuestaProveedor.objects.get(id=respuesta_id, activo=True)
+        except RespuestaProveedor.DoesNotExist:
             return Response(
                 {'error': 'Respuesta del proveedor no válida'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         with transaction.atomic():
-            devolucion.estado = EstadoDevolucionChoices.CONFIRMADO
+            devolucion.estado = estado_confirmado
             devolucion.respuesta_proveedor = respuesta
-            devolucion.observaciones_proveedor = observaciones
-            devolucion.fecha_confirmacion = timezone.now()
-            devolucion.save()
-
-        return Response({
-            'message': f'Respuesta del proveedor confirmada: {devolucion.get_respuesta_proveedor_display()}',
-            'respuesta': devolucion.get_respuesta_proveedor_display()
-        })
-
-    @action(detail=True, methods=['get'])
-    def materiales_detalle(self, request, pk=None):
-        """Obtener detalle de materiales en la devolución"""
-        devolucion = self.get_object()
-        materiales = devolucion.materiales_devueltos.all()
-
-        serializer = DevolucionMaterialSerializer(materiales, many=True)
-        return Response({
-            'devolucion': devolucion.numero_devolucion,
-            'proveedor': devolucion.proveedor.nombre_comercial,
-            'estado': devolucion.get_estado_display(),
-            'materiales': serializer.data
-        })
-
-    @action(detail=False, methods=['get'])
-    def estadisticas(self, request):
-        """Estadísticas de devoluciones"""
-        # Por estado
-        por_estado = {}
-        for estado_choice in EstadoDevolucionChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = DevolucionProveedor.objects.filter(estado=estado_codigo).count()
-            por_estado[estado_nombre] = count
-
-        # Por respuesta del proveedor
-        por_respuesta = {}
-        for respuesta_choice in RespuestaProveedorChoices.choices:
-            respuesta_codigo, respuesta_nombre = respuesta_choice
-            count = DevolucionProveedor.objects.filter(
-                respuesta_proveedor=respuesta_codigo
-            ).count()
-            por_respuesta[respuesta_nombre] = count
-
-        # Por proveedor
-        from django.db.models import Count
-        por_proveedor = DevolucionProveedor.objects.values(
-            'proveedor__nombre_comercial'
-        ).annotate(
-            total_devoluciones=Count('id')
-        ).order_by('-total_devoluciones')[:10]
-
-        # Tiempo promedio de respuesta
-        devoluciones_respondidas = DevolucionProveedor.objects.filter(
-            estado=EstadoDevolucionChoices.CONFIRMADO,
-            fecha_confirmacion__isnull=False,
-            fecha_envio__isnull=False
-        )
-
-        if devoluciones_respondidas.exists():
-            from django.db.models import Avg, F
-            tiempo_promedio = devoluciones_respondidas.annotate(
-                tiempo_respuesta=F('fecha_confirmacion') - F('fecha_envio')
-            ).aggregate(promedio=Avg('tiempo_respuesta'))['promedio']
-
-            tiempo_promedio_dias = tiempo_promedio.days if tiempo_promedio else 0
-        else:
-            tiempo_promedio_dias = 0
-
-        return Response({
-            'total_devoluciones': DevolucionProveedor.objects.count(),
-            'por_estado': por_estado,
-            'por_respuesta': por_respuesta,
-            'por_proveedor': list(por_proveedor),
-            'tiempo_promedio_respuesta_dias': tiempo_promedio_dias,
-            'pendientes': DevolucionProveedor.objects.filter(
-                estado=EstadoDevolucionChoices.PENDIENTE
-            ).count(),
-            'enviadas_sin_respuesta': DevolucionProveedor.objects.filter(
-                estado=EstadoDevolucionChoices.ENVIADO
-            ).count()
-        })
+            devolucion

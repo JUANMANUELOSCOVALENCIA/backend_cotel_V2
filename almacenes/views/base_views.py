@@ -1,5 +1,5 @@
 # ======================================================
-# apps/almacenes/views.py - PASO 1: Views de Almacenes
+# apps/almacenes/views/base_views.py - IMPORTACIONES ARREGLADAS
 # ======================================================
 
 from django.db.models import Count, Q, Sum
@@ -12,8 +12,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from usuarios.permissions import GenericRolePermission
 from ..models import (
-    Almacen, Proveedor, Material, TipoMaterialChoices,
-    EstadoMaterialONUChoices, EstadoMaterialGeneralChoices
+    # Modelos principales
+    Almacen, Proveedor, Material,
+
+    # Modelos de choices (ahora son modelos reales)
+    TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral
 )
 from ..serializers import AlmacenSerializer, ProveedorSerializer, MaterialListSerializer
 
@@ -49,23 +52,30 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         materiales = almacen.material_set.all()
 
         # Filtros opcionales
-        tipo_material = request.query_params.get('tipo_material')
+        tipo_material_id = request.query_params.get('tipo_material_id')
         estado = request.query_params.get('estado')
         marca_id = request.query_params.get('marca_id')
         modelo_id = request.query_params.get('modelo_id')
 
-        if tipo_material:
-            materiales = materiales.filter(tipo_material=tipo_material)
+        if tipo_material_id:
+            materiales = materiales.filter(tipo_material_id=tipo_material_id)
 
         if estado:
             # Aplicar filtro de estado según el tipo de material
-            if tipo_material == TipoMaterialChoices.ONU or not tipo_material:
-                materiales = materiales.filter(
-                    Q(tipo_material=TipoMaterialChoices.ONU, estado_onu=estado) |
-                    Q(estado_general=estado)
-                )
-            else:
-                materiales = materiales.filter(estado_general=estado)
+            # Primero filtrar por equipos únicos (ONU) con el estado especificado
+            materiales_onu = materiales.filter(
+                tipo_material__es_unico=True,
+                estado_onu__codigo=estado
+            )
+
+            # Luego filtrar por materiales generales con el estado especificado
+            materiales_general = materiales.filter(
+                tipo_material__es_unico=False,
+                estado_general__codigo=estado
+            )
+
+            # Combinar ambos querysets
+            materiales = materiales_onu.union(materiales_general)
 
         if marca_id:
             materiales = materiales.filter(modelo__marca_id=marca_id)
@@ -87,16 +97,24 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         """Obtener solo materiales disponibles para asignación o traspaso"""
         almacen = self.get_object()
 
-        # Filtrar materiales disponibles
-        materiales = almacen.material_set.filter(
-            Q(tipo_material=TipoMaterialChoices.ONU, estado_onu=EstadoMaterialONUChoices.DISPONIBLE) |
-            Q(estado_general=EstadoMaterialGeneralChoices.DISPONIBLE)
+        # Filtrar materiales disponibles usando los nuevos modelos
+        materiales_onu = almacen.material_set.filter(
+            tipo_material__es_unico=True,
+            estado_onu__permite_asignacion=True
         )
 
+        materiales_general = almacen.material_set.filter(
+            tipo_material__es_unico=False,
+            estado_general__permite_consumo=True
+        )
+
+        # Combinar ambos querysets
+        materiales = materiales_onu.union(materiales_general)
+
         # Filtros opcionales
-        tipo_material = request.query_params.get('tipo_material')
-        if tipo_material:
-            materiales = materiales.filter(tipo_material=tipo_material)
+        tipo_material_id = request.query_params.get('tipo_material_id')
+        if tipo_material_id:
+            materiales = materiales.filter(tipo_material_id=tipo_material_id)
 
         serializer = MaterialListSerializer(materiales, many=True)
         return Response(serializer.data)
@@ -109,31 +127,29 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         # Estadísticas básicas
         total_materiales = almacen.material_set.count()
 
-        # Materiales por tipo
+        # Materiales por tipo usando los nuevos modelos
         por_tipo = {}
-        for tipo_choice in TipoMaterialChoices.choices:
-            tipo_codigo, tipo_nombre = tipo_choice
-            count = almacen.material_set.filter(tipo_material=tipo_codigo).count()
-            por_tipo[tipo_nombre] = count
+        for tipo_material in TipoMaterial.objects.filter(activo=True):
+            count = almacen.material_set.filter(tipo_material=tipo_material).count()
+            por_tipo[tipo_material.nombre] = count
 
-        # Estados de equipos ONU
+        # Estados de equipos ONU usando el nuevo modelo
         por_estado_onu = {}
-        for estado_choice in EstadoMaterialONUChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
+        for estado in EstadoMaterialONU.objects.filter(activo=True):
             count = almacen.material_set.filter(
-                tipo_material=TipoMaterialChoices.ONU,
-                estado_onu=estado_codigo
+                tipo_material__es_unico=True,
+                estado_onu=estado
             ).count()
-            por_estado_onu[estado_nombre] = count
+            por_estado_onu[estado.nombre] = count
 
-        # Estados de otros materiales
+        # Estados de otros materiales usando el nuevo modelo
         por_estado_general = {}
-        for estado_choice in EstadoMaterialGeneralChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = almacen.material_set.exclude(
-                tipo_material=TipoMaterialChoices.ONU
-            ).filter(estado_general=estado_codigo).count()
-            por_estado_general[estado_nombre] = count
+        for estado in EstadoMaterialGeneral.objects.filter(activo=True):
+            count = almacen.material_set.filter(
+                tipo_material__es_unico=False,
+                estado_general=estado
+            ).count()
+            por_estado_general[estado.nombre] = count
 
         # Top 10 materiales más antiguos
         materiales_antiguos = almacen.material_set.order_by('created_at')[:10]
@@ -150,7 +166,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                 'id': almacen.id,
                 'codigo': almacen.codigo,
                 'nombre': almacen.nombre,
-                'tipo': almacen.get_tipo_display(),
+                'tipo': almacen.tipo.nombre if almacen.tipo else 'Sin tipo',
                 'es_principal': almacen.es_principal
             },
             'totales': {
@@ -185,7 +201,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                 'almacen_origen': traspaso.almacen_origen.nombre,
                 'cantidad': traspaso.cantidad_recibida or traspaso.cantidad_enviada,
                 'fecha': traspaso.fecha_recepcion or traspaso.fecha_envio,
-                'estado': traspaso.estado
+                'estado': traspaso.estado.nombre if traspaso.estado else 'Sin estado'
             })
 
         for traspaso in traspasos_salida:
@@ -195,7 +211,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                 'almacen_destino': traspaso.almacen_destino.nombre,
                 'cantidad': traspaso.cantidad_enviada,
                 'fecha': traspaso.fecha_envio,
-                'estado': traspaso.estado
+                'estado': traspaso.estado.nombre if traspaso.estado else 'Sin estado'
             })
 
         # Ordenar por fecha
@@ -223,7 +239,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
     def regionales(self, request):
         """Obtener todos los almacenes regionales activos"""
         almacenes = Almacen.objects.filter(
-            tipo='REGIONAL',
+            tipo__codigo='REGIONAL',
             activo=True
         ).order_by('nombre')
 
@@ -250,7 +266,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                 'id': almacen.id,
                 'codigo': almacen.codigo,
                 'nombre': almacen.nombre,
-                'tipo': almacen.get_tipo_display(),
+                'tipo': almacen.tipo.nombre if almacen.tipo else 'Sin tipo',
                 'es_principal': almacen.es_principal,
                 'total_materiales': total_materiales,
                 'materiales_disponibles': total_disponibles,
@@ -316,18 +332,14 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         proveedor = self.get_object()
         lotes = proveedor.lote_set.all().order_by('-created_at')
 
-        # Filtros opcionales
-        estado = request.query_params.get('estado')
-        tipo_ingreso = request.query_params.get('tipo_ingreso')
+        # Filtros opcionales usando los nuevos modelos
+        estado_codigo = request.query_params.get('estado')
+        tipo_ingreso_codigo = request.query_params.get('tipo_ingreso')
 
-        if estado:
-            lotes = lotes.filter(estado=estado)
-        if tipo_ingreso:
-            lotes = lotes.filter(tipo_ingreso=tipo_ingreso)
-
-        # Cuando tengamos LoteSerializer, usar:
-        # serializer = LoteSerializer(lotes, many=True)
-        # return Response(serializer.data)
+        if estado_codigo:
+            lotes = lotes.filter(estado__codigo=estado_codigo)
+        if tipo_ingreso_codigo:
+            lotes = lotes.filter(tipo_ingreso__codigo=tipo_ingreso_codigo)
 
         # Por ahora, respuesta básica:
         lotes_data = []
@@ -335,8 +347,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             lotes_data.append({
                 'id': lote.id,
                 'numero_lote': lote.numero_lote,
-                'tipo_ingreso': lote.tipo_ingreso,
-                'estado': lote.estado,
+                'tipo_ingreso': lote.tipo_ingreso.nombre if lote.tipo_ingreso else 'Sin tipo',
+                'estado': lote.estado.nombre if lote.estado else 'Sin estado',
                 'fecha_recepcion': lote.fecha_recepcion,
                 'cantidad_total': lote.cantidad_total,
                 'cantidad_recibida': lote.cantidad_recibida
@@ -353,26 +365,24 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         lotes = proveedor.lote_set.all()
         total_lotes = lotes.count()
 
-        # Lotes por estado
-        from ..models import EstadoLoteChoices
+        # Lotes por estado usando el nuevo modelo
+        from ..models import EstadoLote
         lotes_por_estado = {}
-        for estado_choice in EstadoLoteChoices.choices:
-            estado_codigo, estado_nombre = estado_choice
-            count = lotes.filter(estado=estado_codigo).count()
-            lotes_por_estado[estado_nombre] = count
+        for estado in EstadoLote.objects.filter(activo=True):
+            count = lotes.filter(estado=estado).count()
+            lotes_por_estado[estado.nombre] = count
 
         # Materiales totales suministrados
         total_materiales = Material.objects.filter(lote__proveedor=proveedor).count()
 
-        # Materiales por tipo
+        # Materiales por tipo usando el nuevo modelo
         materiales_por_tipo = {}
-        for tipo_choice in TipoMaterialChoices.choices:
-            tipo_codigo, tipo_nombre = tipo_choice
+        for tipo_material in TipoMaterial.objects.filter(activo=True):
             count = Material.objects.filter(
                 lote__proveedor=proveedor,
-                tipo_material=tipo_codigo
+                tipo_material=tipo_material
             ).count()
-            materiales_por_tipo[tipo_nombre] = count
+            materiales_por_tipo[tipo_material.nombre] = count
 
         # Lotes recientes (últimos 5)
         lotes_recientes = lotes.order_by('-created_at')[:5]
@@ -393,7 +403,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 {
                     'id': lote.id,
                     'numero_lote': lote.numero_lote,
-                    'estado': lote.get_estado_display(),
+                    'estado': lote.estado.nombre if lote.estado else 'Sin estado',
                     'fecha_recepcion': lote.fecha_recepcion,
                     'cantidad_total': lote.cantidad_total
                 } for lote in lotes_recientes

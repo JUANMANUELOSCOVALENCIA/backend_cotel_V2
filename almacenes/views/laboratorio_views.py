@@ -1,5 +1,5 @@
 # ======================================================
-# almacenes/views/laboratorio_views.py
+# almacenes/views/laboratorio_views.py - ACTUALIZADO SIN TEXTCHOICES
 # Views para operaciones de laboratorio
 # ======================================================
 
@@ -14,8 +14,9 @@ from rest_framework.decorators import action
 
 from usuarios.permissions import GenericRolePermission
 from ..models import (
-    Material, Lote, TipoMaterialChoices, EstadoMaterialONUChoices,
-    TipoIngresoChoices, EstadoLoteChoices, HistorialMaterial
+    Material, Lote,
+    # Modelos de choices (antes TextChoices)
+    TipoMaterial, EstadoMaterialONU, TipoIngreso, EstadoLote, HistorialMaterial
 )
 from ..serializers import (
     LaboratorioOperacionSerializer, MaterialListSerializer
@@ -28,17 +29,32 @@ class LaboratorioView(APIView):
 
     def get(self, request):
         """Dashboard de laboratorio con estadísticas"""
+
+        try:
+            # Obtener estados y tipos necesarios
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+            tipo_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
+            estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+            estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist, TipoIngreso.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de estados de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         # Materiales actualmente en laboratorio
         en_laboratorio = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
-            estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO
+            tipo_material=tipo_onu,
+            estado_onu=estado_laboratorio
         )
 
         # Materiales nuevos pendientes de inspección
         pendientes_inspeccion = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
+            tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=EstadoMaterialONUChoices.NUEVO
+            estado_onu=estado_nuevo
         )
 
         # Materiales con mucho tiempo en laboratorio (>15 días)
@@ -64,8 +80,8 @@ class LaboratorioView(APIView):
             fecha_retorno_laboratorio__gte=hace_7_dias
         ).aggregate(
             total=Count('id'),
-            exitosos=Count('id', filter=Q(estado_onu=EstadoMaterialONUChoices.DISPONIBLE)),
-            defectuosos=Count('id', filter=Q(estado_onu=EstadoMaterialONUChoices.DEFECTUOSO))
+            exitosos=Count('id', filter=Q(estado_onu=estado_disponible)),
+            defectuosos=Count('id', filter=Q(estado_onu=estado_defectuoso))
         )
 
         return Response({
@@ -104,7 +120,7 @@ class LaboratorioView(APIView):
                 'material': {
                     'id': material.id,
                     'codigo_interno': material.codigo_interno,
-                    'estado_actual': material.get_estado_display()
+                    'estado_actual': material.estado_display
                 }
             })
 
@@ -147,14 +163,17 @@ class LaboratorioMasivoView(APIView):
 
         try:
             lote = Lote.objects.get(id=lote_id)
-        except Lote.DoesNotExist:
+            tipo_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+        except (Lote.DoesNotExist, TipoIngreso.DoesNotExist, TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
             return Response(
-                {'error': 'Lote no encontrado'},
+                {'error': 'Lote no encontrado o configuración incompleta'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
         # Solo lotes nuevos pueden enviarse masivamente
-        if lote.tipo_ingreso != TipoIngresoChoices.NUEVO:
+        if lote.tipo_ingreso != tipo_nuevo:
             return Response(
                 {'error': 'Solo lotes nuevos pueden enviarse masivamente a laboratorio'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -162,9 +181,9 @@ class LaboratorioMasivoView(APIView):
 
         materiales_nuevos = Material.objects.filter(
             lote=lote,
-            tipo_material=TipoMaterialChoices.ONU,
+            tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=EstadoMaterialONUChoices.NUEVO
+            estado_onu=estado_nuevo
         )
 
         if not materiales_nuevos.exists():
@@ -205,10 +224,19 @@ class LaboratorioMasivoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         materiales = Material.objects.filter(
             id__in=materiales_ids,
-            tipo_material=TipoMaterialChoices.ONU,
-            estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO
+            tipo_material=tipo_onu,
+            estado_onu=estado_laboratorio
         )
 
         if not materiales.exists():
@@ -246,10 +274,20 @@ class LaboratorioMasivoView(APIView):
 
     def _enviar_pendientes_inspeccion(self, request):
         """Enviar todos los materiales pendientes de inspección inicial"""
+
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         materiales_pendientes = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
+            tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=EstadoMaterialONUChoices.NUEVO
+            estado_onu=estado_nuevo
         )
 
         if not materiales_pendientes.exists():
@@ -295,9 +333,19 @@ class LaboratorioConsultaView(APIView):
 
     def _materiales_en_laboratorio(self, request):
         """Materiales actualmente en laboratorio"""
+
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         materiales = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
-            estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO
+            tipo_material=tipo_onu,
+            estado_onu=estado_laboratorio
         ).order_by('fecha_envio_laboratorio')
 
         # Calcular días en laboratorio para cada material
@@ -324,10 +372,20 @@ class LaboratorioConsultaView(APIView):
 
     def _pendientes_inspeccion(self, request):
         """Materiales nuevos pendientes de inspección inicial"""
+
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         materiales = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
+            tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=EstadoMaterialONUChoices.NUEVO
+            estado_onu=estado_nuevo
         ).select_related('modelo__marca', 'lote', 'almacen_actual')
 
         serializer = MaterialListSerializer(materiales, many=True)
@@ -342,9 +400,18 @@ class LaboratorioConsultaView(APIView):
         dias_limite = int(request.query_params.get('dias_limite', 15))
         fecha_limite = datetime.now() - timedelta(days=dias_limite)
 
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+        except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Configuración de laboratorio incompleta'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
         materiales = Material.objects.filter(
-            tipo_material=TipoMaterialChoices.ONU,
-            estado_onu=EstadoMaterialONUChoices.EN_LABORATORIO,
+            tipo_material=tipo_onu,
+            estado_onu=estado_laboratorio,
             fecha_envio_laboratorio__lt=fecha_limite
         ).select_related('modelo__marca', 'lote', 'almacen_actual')
 
@@ -371,6 +438,11 @@ class LaboratorioConsultaView(APIView):
         dias_historial = int(request.query_params.get('dias', 30))
         fecha_desde = datetime.now() - timedelta(days=dias_historial)
 
+        try:
+            estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+        except EstadoMaterialONU.DoesNotExist:
+            estado_disponible = None
+
         materiales = Material.objects.filter(
             fecha_retorno_laboratorio__gte=fecha_desde
         ).select_related('modelo__marca', 'lote').order_by('-fecha_retorno_laboratorio')
@@ -390,8 +462,8 @@ class LaboratorioConsultaView(APIView):
                 'fecha_envio': material.fecha_envio_laboratorio,
                 'fecha_retorno': material.fecha_retorno_laboratorio,
                 'dias_procesamiento': dias_en_lab,
-                'resultado': material.get_estado_display(),
-                'exitoso': material.estado_onu == EstadoMaterialONUChoices.DISPONIBLE
+                'resultado': material.estado_display,
+                'exitoso': material.estado_onu == estado_disponible if estado_disponible else False
             })
 
         # Estadísticas del período

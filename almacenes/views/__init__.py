@@ -1,5 +1,5 @@
 # ======================================================
-# almacenes/views/__init__.py
+# almacenes/views/__init__.py - ACTUALIZADO
 # Exportar todas las views del módulo de almacenes
 # ======================================================
 
@@ -55,6 +55,22 @@ from .compatibility_views import (
     ComponenteViewSet
 )
 
+# NUEVAS Views para modelos de choices
+from .choices_views import (
+    TipoIngresoViewSet,
+    EstadoLoteViewSet,
+    EstadoTraspasoViewSet,
+    TipoMaterialViewSet,
+    UnidadMedidaViewSet,
+    EstadoMaterialONUViewSet,
+    EstadoMaterialGeneralViewSet,
+    TipoAlmacenViewSet,
+    EstadoDevolucionViewSet,
+    RespuestaProveedorViewSet,
+    OpcionesCompletasView,
+    InicializarDatosView
+)
+
 # Exportar todas las views
 __all__ = [
     # Views base
@@ -94,4 +110,18 @@ __all__ = [
     'ModeloViewSet',
     'EstadoEquipoViewSet',
     'ComponenteViewSet',
+
+    # NUEVAS Views para modelos de choices
+    'TipoIngresoViewSet',
+    'EstadoLoteViewSet',
+    'EstadoTraspasoViewSet',
+    'TipoMaterialViewSet',
+    'UnidadMedidaViewSet',
+    'EstadoMaterialONUViewSet',
+    'EstadoMaterialGeneralViewSet',
+    'TipoAlmacenViewSet',
+    'EstadoDevolucionViewSet',
+    'RespuestaProveedorViewSet',
+    'OpcionesCompletasView',
+    'InicializarDatosView',
 ]

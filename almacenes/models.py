@@ -1,6 +1,6 @@
 # ======================================================
-# apps/almacenes/models.py
-# Sistema Integral de Gestión de Almacenes GPON/Fibra Óptica
+# apps/almacenes/models.py - COMPLETO SIN TEXTCHOICES
+# Todos los choices ahora son modelos en base de datos
 # ======================================================
 
 from django.db import models
@@ -10,108 +10,281 @@ from django.contrib.contenttypes.models import ContentType
 import re
 
 
-# ========== ENUMS Y CHOICES ==========
+# ========== MODELOS BASE PARA CHOICES ==========
 
-class TipoIngresoChoices(models.TextChoices):
-    NUEVO = 'NUEVO', 'Nuevo'
-    REINGRESO = 'REINGRESO', 'Reingreso'
-    DEVOLUCION = 'DEVOLUCION', 'Devolución'
-    LABORATORIO = 'LABORATORIO', 'Laboratorio'
+class TipoIngreso(models.Model):
+    """Tipos de ingreso de lotes"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0, help_text="Orden de visualización")
 
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-class EstadoLoteChoices(models.TextChoices):
-    REGISTRADO = 'REGISTRADO', 'Registrado'
-    PENDIENTE_RECEPCION = 'PENDIENTE_RECEPCION', 'Pendiente Recepción'
-    RECEPCION_PARCIAL = 'RECEPCION_PARCIAL', 'Recepción Parcial'
-    RECEPCION_COMPLETA = 'RECEPCION_COMPLETA', 'Recepción Completa'
-    ACTIVO = 'ACTIVO', 'Activo'
-    CERRADO = 'CERRADO', 'Cerrado'
+    class Meta:
+        db_table = 'almacenes_tipo_ingreso'
+        verbose_name = 'Tipo de Ingreso'
+        verbose_name_plural = 'Tipos de Ingreso'
+        ordering = ['orden', 'nombre']
 
-
-class EstadoTraspasoChoices(models.TextChoices):
-    PENDIENTE = 'PENDIENTE', 'Pendiente'
-    EN_TRANSITO = 'EN_TRANSITO', 'En Tránsito'
-    RECIBIDO = 'RECIBIDO', 'Recibido'
-    CANCELADO = 'CANCELADO', 'Cancelado'
+    def __str__(self):
+        return self.nombre
 
 
-class TipoMaterialChoices(models.TextChoices):
-    ONU = 'ONU', 'Equipo ONU'
-    CABLE_DROP = 'CABLE_DROP', 'Cable Drop'
-    CONECTOR_APC = 'CONECTOR_APC', 'Conector APC'
-    CONECTOR_UPC = 'CONECTOR_UPC', 'Conector UPC'
-    ROSETA_OPTICA = 'ROSETA_OPTICA', 'Roseta Óptica'
-    PATCH_CORE = 'PATCH_CORE', 'Patch Core'
-    TRIPLEXOR = 'TRIPLEXOR', 'Triplexor'
-    OTRO = 'OTRO', 'Otro Material'
+class EstadoLote(models.Model):
+    """Estados de lotes"""
+    codigo = models.CharField(max_length=30, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#6B7280', help_text="Color hex para UI")
+    es_final = models.BooleanField(default=False, help_text="Indica si es un estado final")
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_estado_lote'
+        verbose_name = 'Estado de Lote'
+        verbose_name_plural = 'Estados de Lote'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
 
 
-class UnidadMedidaChoices(models.TextChoices):
-    PIEZA = 'PIEZA', 'Pieza'
-    UNIDAD = 'UNIDAD', 'Unidad'
-    METROS = 'METROS', 'Metros'
-    CAJA = 'CAJA', 'Caja'
-    ROLLO = 'ROLLO', 'Rollo'
-    KIT = 'KIT', 'Kit'
-    PAQUETE = 'PAQUETE', 'Paquete'
+class EstadoTraspaso(models.Model):
+    """Estados de traspasos"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#6B7280')
+    es_final = models.BooleanField(default=False)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_estado_traspaso'
+        verbose_name = 'Estado de Traspaso'
+        verbose_name_plural = 'Estados de Traspaso'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
 
 
-class EstadoMaterialONUChoices(models.TextChoices):
-    NUEVO = 'NUEVO', 'Nuevo'
-    DISPONIBLE = 'DISPONIBLE', 'Disponible'
-    RESERVADO = 'RESERVADO', 'Reservado'
-    ASIGNADO = 'ASIGNADO', 'Asignado'
-    INSTALADO = 'INSTALADO', 'Instalado'
-    EN_LABORATORIO = 'EN_LABORATORIO', 'En Laboratorio'
-    DEFECTUOSO = 'DEFECTUOSO', 'Defectuoso'
-    DEVUELTO_PROVEEDOR = 'DEVUELTO_PROVEEDOR', 'Devuelto a Proveedor'
-    REINGRESADO = 'REINGRESADO', 'Reingresado'
-    DADO_DE_BAJA = 'DADO_DE_BAJA', 'Dado de Baja'
+class TipoMaterial(models.Model):
+    """Tipos de materiales"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=100)
+    descripcion = models.TextField(blank=True)
+    unidad_medida_default = models.ForeignKey(
+        'UnidadMedida',
+        on_delete=models.CASCADE,
+        help_text="Unidad de medida por defecto"
+    )
+    requiere_inspeccion_inicial = models.BooleanField(default=False)
+    es_unico = models.BooleanField(
+        default=False,
+        help_text="True para equipos únicos (ONU), False para materiales por cantidad"
+    )
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        'usuarios.Usuario',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tipos_material_creados'
+    )
+
+    class Meta:
+        db_table = 'almacenes_tipo_material'
+        verbose_name = 'Tipo de Material'
+        verbose_name_plural = 'Tipos de Material'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
 
 
-class EstadoMaterialGeneralChoices(models.TextChoices):
-    DISPONIBLE = 'DISPONIBLE', 'Disponible'
-    RESERVADO = 'RESERVADO', 'Reservado'
-    ASIGNADO = 'ASIGNADO', 'Asignado'
-    CONSUMIDO = 'CONSUMIDO', 'Consumido'
-    DEFECTUOSO = 'DEFECTUOSO', 'Defectuoso'
-    DADO_DE_BAJA = 'DADO_DE_BAJA', 'Dado de Baja'
+class UnidadMedida(models.Model):
+    """Unidades de medida"""
+    codigo = models.CharField(max_length=15, unique=True)
+    nombre = models.CharField(max_length=50)
+    simbolo = models.CharField(max_length=10, help_text="Símbolo de la unidad (m, kg, pza, etc.)")
+    descripcion = models.TextField(blank=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_unidad_medida'
+        verbose_name = 'Unidad de Medida'
+        verbose_name_plural = 'Unidades de Medida'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.simbolo})"
 
 
-class TipoAlmacenChoices(models.TextChoices):
-    PRINCIPAL = 'PRINCIPAL', 'Principal'
-    REGIONAL = 'REGIONAL', 'Regional'
-    TEMPORAL = 'TEMPORAL', 'Temporal'
+class EstadoMaterialONU(models.Model):
+    """Estados específicos para equipos ONU"""
+    codigo = models.CharField(max_length=30, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#6B7280')
+    permite_asignacion = models.BooleanField(default=False, help_text="Si permite asignar a servicios")
+    permite_traspaso = models.BooleanField(default=True, help_text="Si permite traspasos")
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_estado_material_onu'
+        verbose_name = 'Estado de Material ONU'
+        verbose_name_plural = 'Estados de Material ONU'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
 
 
-class EstadoDevolucionChoices(models.TextChoices):
-    PENDIENTE = 'PENDIENTE', 'Pendiente'
-    ENVIADO = 'ENVIADO', 'Enviado'
-    CONFIRMADO = 'CONFIRMADO', 'Confirmado'
-    RECHAZADO = 'RECHAZADO', 'Rechazado'
+class EstadoMaterialGeneral(models.Model):
+    """Estados para materiales generales (no únicos)"""
+    codigo = models.CharField(max_length=25, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#6B7280')
+    permite_consumo = models.BooleanField(default=False, help_text="Si permite consumir en servicios")
+    permite_traspaso = models.BooleanField(default=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_estado_material_general'
+        verbose_name = 'Estado de Material General'
+        verbose_name_plural = 'Estados de Material General'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
 
 
-class RespuestaProveedorChoices(models.TextChoices):
-    REPOSICION = 'REPOSICION', 'Reposición'
-    CREDITO = 'CREDITO', 'Crédito'
-    RECHAZO = 'RECHAZO', 'Rechazo'
-    PENDIENTE = 'PENDIENTE', 'Pendiente'
+class TipoAlmacen(models.Model):
+    """Tipos de almacén"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_tipo_almacen'
+        verbose_name = 'Tipo de Almacén'
+        verbose_name_plural = 'Tipos de Almacén'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
 
 
-# ========== MODELOS BASE ==========
+class EstadoDevolucion(models.Model):
+    """Estados de devoluciones a proveedores"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#6B7280')
+    es_final = models.BooleanField(default=False)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_estado_devolucion'
+        verbose_name = 'Estado de Devolución'
+        verbose_name_plural = 'Estados de Devolución'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
+
+class RespuestaProveedor(models.Model):
+    """Respuestas de proveedores a devoluciones"""
+    codigo = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=50)
+    descripcion = models.TextField(blank=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_respuesta_proveedor'
+        verbose_name = 'Respuesta de Proveedor'
+        verbose_name_plural = 'Respuestas de Proveedor'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
+
+# ========== MODELOS PRINCIPALES ==========
 
 class Almacen(models.Model):
     """Modelo para gestión de almacenes regionales"""
     codigo = models.CharField(max_length=10, unique=True, help_text="Código único del almacén")
     nombre = models.CharField(max_length=100, help_text="Nombre del almacén")
     ciudad = models.CharField(max_length=50, help_text="Ciudad donde se ubica")
-    tipo = models.CharField(
-        max_length=20,
-        choices=TipoAlmacenChoices.choices,
-        default=TipoAlmacenChoices.REGIONAL
+    tipo = models.ForeignKey(
+        TipoAlmacen,
+        on_delete=models.CASCADE,
+        help_text="Tipo de almacén"
     )
     direccion = models.TextField(blank=True, help_text="Dirección física")
     es_principal = models.BooleanField(default=False, help_text="Indica si es el almacén principal")
+
+    # NUEVO: Encargado opcional
+    encargado = models.ForeignKey(
+        'usuarios.Usuario',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='almacenes_a_cargo',
+        help_text="Encargado del almacén (opcional)"
+    )
+
+    # NUEVO: Campo para código COTEL
+    codigo_cotel_encargado = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text="Código COTEL del encargado (se buscará automáticamente)"
+    )
+
     activo = models.BooleanField(default=True)
     observaciones = models.TextField(blank=True)
 
@@ -136,14 +309,43 @@ class Almacen(models.Model):
 
     def clean(self):
         if self.es_principal:
-            # Solo un almacén puede ser principal
             otros_principales = Almacen.objects.filter(es_principal=True).exclude(pk=self.pk)
             if otros_principales.exists():
                 raise ValidationError("Solo puede existir un almacén principal")
 
-    def puede_eliminar(self):
-        """Verificar si el almacén puede ser eliminado"""
-        return not self.material_set.exists()
+        # Validar código COTEL si se proporciona
+        if self.codigo_cotel_encargado:
+            try:
+                from usuarios.models import Usuario
+                encargado = Usuario.objects.get(codigo_cotel=self.codigo_cotel_encargado)
+                self.encargado = encargado
+            except Usuario.DoesNotExist:
+                raise ValidationError(f"No se encontró usuario con código COTEL: {self.codigo_cotel_encargado}")
+
+    def save(self, *args, **kwargs):
+        # Auto-asignar encargado por código COTEL
+        if self.codigo_cotel_encargado and not self.encargado:
+            try:
+                from usuarios.models import Usuario
+                self.encargado = Usuario.objects.get(codigo_cotel=self.codigo_cotel_encargado)
+            except Usuario.DoesNotExist:
+                pass
+
+        super().save(*args, **kwargs)
+
+    @property
+    def encargado_info(self):
+        """Información del encargado para la API"""
+        if self.encargado:
+            return {
+                'id': self.encargado.id,
+                'codigo_cotel': self.encargado.codigo_cotel,
+                'nombre_completo': self.encargado.nombre_completo,
+                'email': self.encargado.email,
+                'telefono': getattr(self.encargado, 'telefono', ''),
+                'cargo': getattr(self.encargado, 'cargo', '')
+            }
+        return None
 
     @property
     def total_materiales(self):
@@ -151,9 +353,18 @@ class Almacen(models.Model):
 
     @property
     def materiales_disponibles(self):
-        return self.material_set.filter(
-            estado_general=EstadoMaterialGeneralChoices.DISPONIBLE
+        # Buscar por estados que permiten asignación/consumo
+        onu_disponibles = self.material_set.filter(
+            tipo_material__es_unico=True,
+            estado_onu__permite_asignacion=True
         ).count()
+
+        general_disponibles = self.material_set.filter(
+            tipo_material__es_unico=False,
+            estado_general__permite_consumo=True
+        ).count()
+
+        return onu_disponibles + general_disponibles
 
 
 class Proveedor(models.Model):
@@ -191,7 +402,7 @@ class Proveedor(models.Model):
 class Marca(models.Model):
     nombre = models.CharField(max_length=100, unique=True)
     descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)  # NUEVO
+    activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -205,7 +416,7 @@ class Marca(models.Model):
 class TipoEquipo(models.Model):
     nombre = models.CharField(max_length=50, unique=True)
     descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)  # NUEVO
+    activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -219,7 +430,7 @@ class TipoEquipo(models.Model):
 class Componente(models.Model):
     nombre = models.CharField(max_length=100, unique=True)
     descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)  # NUEVO
+    activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -231,10 +442,10 @@ class Componente(models.Model):
 
 
 class EstadoEquipo(models.Model):
-    """Ahora será para compatibilidad, los nuevos estados están en el modelo Material"""
+    """Para compatibilidad - los nuevos estados están en EstadoMaterialONU"""
     nombre = models.CharField(max_length=50, unique=True)
     descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)  # NUEVO
+    activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -251,21 +462,22 @@ class Modelo(models.Model):
     nombre = models.CharField(max_length=100)
     codigo_modelo = models.IntegerField(unique=True)
     descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)  # NUEVO
+    activo = models.BooleanField(default=True)
 
-    # NUEVOS CAMPOS PARA SOPORTE DE DIFERENTES MATERIALES
-    tipo_material = models.CharField(
-        max_length=20,
-        choices=TipoMaterialChoices.choices,
-        default=TipoMaterialChoices.ONU,
+    # NUEVO: ForeignKey a TipoMaterial
+    tipo_material = models.ForeignKey(
+        TipoMaterial,
+        on_delete=models.CASCADE,
         help_text="Tipo de material que representa este modelo"
     )
-    unidad_medida = models.CharField(
-        max_length=15,
-        choices=UnidadMedidaChoices.choices,
-        default=UnidadMedidaChoices.PIEZA,
-        help_text="Unidad de medida para este tipo de material"
+
+    # NUEVO: ForeignKey a UnidadMedida
+    unidad_medida = models.ForeignKey(
+        UnidadMedida,
+        on_delete=models.CASCADE,
+        help_text="Unidad de medida para este modelo"
     )
+
     cantidad_por_unidad = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -287,12 +499,16 @@ class Modelo(models.Model):
         unique_together = ['marca', 'nombre']
         db_table = 'almacenes_modelo'
 
-    def clean(self):
-        """Validaciones específicas por tipo de material"""
-        if self.tipo_material == TipoMaterialChoices.ONU:
-            self.requiere_inspeccion_inicial = True  # ONUs siempre requieren inspección
-            self.unidad_medida = UnidadMedidaChoices.PIEZA
-            self.cantidad_por_unidad = 1.00
+    def save(self, *args, **kwargs):
+        # Heredar configuraciones del tipo de material si no están establecidas
+        if self.tipo_material:
+            if not self.unidad_medida_id:
+                self.unidad_medida = self.tipo_material.unidad_medida_default
+
+            if not hasattr(self, '_inspeccion_set'):
+                self.requiere_inspeccion_inicial = self.tipo_material.requiere_inspeccion_inicial
+
+        super().save(*args, **kwargs)
 
 
 class ModeloComponente(models.Model):
@@ -305,15 +521,15 @@ class ModeloComponente(models.Model):
         db_table = 'almacenes_modelo_componente'
 
 
-# ========== NUEVO MODELO DE LOTE COMPLETO ==========
+# ========== MODELO DE LOTE ==========
 
 class Lote(models.Model):
-    """Modelo de lote completamente rediseñado"""
+    """Modelo de lote con referencias a ForeignKeys"""
     numero_lote = models.CharField(max_length=50, unique=True)
-    tipo_ingreso = models.CharField(
-        max_length=20,
-        choices=TipoIngresoChoices.choices,
-        default=TipoIngresoChoices.NUEVO
+    tipo_ingreso = models.ForeignKey(
+        TipoIngreso,
+        on_delete=models.CASCADE,
+        help_text="Tipo de ingreso del lote"
     )
     proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
     almacen_destino = models.ForeignKey(
@@ -339,10 +555,10 @@ class Lote(models.Model):
     fecha_fin_garantia = models.DateField(help_text="Fin de garantía")
 
     # Estado del lote
-    estado = models.CharField(
-        max_length=25,
-        choices=EstadoLoteChoices.choices,
-        default=EstadoLoteChoices.REGISTRADO
+    estado = models.ForeignKey(
+        EstadoLote,
+        on_delete=models.CASCADE,
+        help_text="Estado actual del lote"
     )
 
     # Campos específicos para lotes de laboratorio
@@ -374,48 +590,20 @@ class Lote(models.Model):
     def __str__(self):
         return f"{self.numero_lote} - {self.proveedor.nombre_comercial}"
 
-    def clean(self):
-        """Validaciones del lote"""
-        # Validar códigos SPRINT
-        if not (6 <= len(self.codigo_requerimiento_compra) <= 10):
-            raise ValidationError("El código de requerimiento debe tener entre 6 y 10 dígitos")
-
-        if not (6 <= len(self.codigo_nota_ingreso) <= 10):
-            raise ValidationError("El código de nota de ingreso debe tener entre 6 y 10 dígitos")
-
-        if not self.codigo_requerimiento_compra.isdigit():
-            raise ValidationError("El código de requerimiento solo puede contener números")
-
-        if not self.codigo_nota_ingreso.isdigit():
-            raise ValidationError("El código de nota de ingreso solo puede contener números")
-
-        # Validar fechas
-        if self.fecha_fin_garantia <= self.fecha_inicio_garantia:
-            raise ValidationError("La fecha de fin de garantía debe ser posterior al inicio")
-
-        # Validar almacén destino para lotes nuevos
-        if self.tipo_ingreso == TipoIngresoChoices.NUEVO:
-            if not self.almacen_destino.es_principal:
-                raise ValidationError("Los lotes nuevos solo pueden ir al almacén principal")
-
     @property
     def cantidad_total(self):
-        """Cantidad total esperada en el lote"""
         return sum(detalle.cantidad for detalle in self.detalles.all())
 
     @property
     def cantidad_recibida(self):
-        """Cantidad total recibida (materiales creados)"""
         return self.material_set.count()
 
     @property
     def cantidad_pendiente(self):
-        """Cantidad pendiente de recibir"""
         return max(0, self.cantidad_total - self.cantidad_recibida)
 
     @property
     def porcentaje_recibido(self):
-        """Porcentaje de materiales recibidos"""
         total = self.cantidad_total
         if total == 0:
             return 0
@@ -428,10 +616,10 @@ class EntregaParcialLote(models.Model):
     numero_entrega = models.PositiveIntegerField(help_text="Número de entrega parcial (1, 2, 3, etc.)")
     fecha_entrega = models.DateField(help_text="Fecha de esta entrega parcial")
     cantidad_entregada = models.PositiveIntegerField(help_text="Cantidad entregada en esta parte")
-    estado_entrega = models.CharField(
-        max_length=25,
-        choices=EstadoLoteChoices.choices,
-        default=EstadoLoteChoices.RECEPCION_PARCIAL
+    estado_entrega = models.ForeignKey(
+        EstadoLote,
+        on_delete=models.CASCADE,
+        help_text="Estado de esta entrega parcial"
     )
     observaciones = models.TextField(blank=True)
 
@@ -470,12 +658,10 @@ class LoteDetalle(models.Model):
 
     @property
     def cantidad_recibida(self):
-        """Cantidad recibida de este modelo en el lote"""
         return self.lote.material_set.filter(modelo=self.modelo).count()
 
     @property
     def cantidad_pendiente(self):
-        """Cantidad pendiente de este modelo"""
         return max(0, self.cantidad - self.cantidad_recibida)
 
 
@@ -487,9 +673,11 @@ class Material(models.Model):
     # Identificación básica
     codigo_interno = models.CharField(max_length=50, unique=True,
                                       help_text="Código interno único generado automáticamente")
-    tipo_material = models.CharField(
-        max_length=20,
-        choices=TipoMaterialChoices.choices,
+
+    # NUEVO: ForeignKey a TipoMaterial
+    tipo_material = models.ForeignKey(
+        TipoMaterial,
+        on_delete=models.CASCADE,
         help_text="Tipo de material"
     )
 
@@ -498,17 +686,15 @@ class Material(models.Model):
     tipo_equipo = models.ForeignKey(TipoEquipo, on_delete=models.CASCADE)  # Para compatibilidad
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, help_text="Lote de origen")
 
-    # Campos específicos para equipos ONU (solo aplican si tipo_material = 'ONU')
+    # Campos específicos para equipos únicos
     mac_address = models.CharField(max_length=17, blank=True, unique=True, null=True,
-                                   help_text="MAC Address para equipos ONU")
+                                   help_text="MAC Address para equipos únicos")
     gpon_serial = models.CharField(max_length=100, blank=True, unique=True, null=True,
-                                   help_text="GPON Serial para equipos ONU")
+                                   help_text="GPON Serial para equipos únicos")
     serial_manufacturer = models.CharField(max_length=100, blank=True, unique=True, null=True,
-                                           help_text="D-SN/Serial Manufacturer para equipos ONU")
+                                           help_text="D-SN/Serial Manufacturer para equipos únicos")
 
-    # Campos para otros materiales
-    codigo_barras = models.CharField(max_length=100, blank=True,
-                                     help_text="Código de barras o identificador alternativo")
+    # ELIMINADO: codigo_barras
     especificaciones_tecnicas = models.JSONField(default=dict, blank=True,
                                                  help_text="Especificaciones técnicas del material")
 
@@ -523,17 +709,19 @@ class Material(models.Model):
                                        help_text="Almacén donde se encuentra actualmente")
 
     # Estados específicos según tipo de material
-    estado_onu = models.CharField(
-        max_length=25,
-        choices=EstadoMaterialONUChoices.choices,
+    estado_onu = models.ForeignKey(
+        EstadoMaterialONU,
+        on_delete=models.CASCADE,
+        null=True,
         blank=True,
-        help_text="Estado específico para equipos ONU"
+        help_text="Estado específico para equipos únicos (ONU, etc.)"
     )
-    estado_general = models.CharField(
-        max_length=20,
-        choices=EstadoMaterialGeneralChoices.choices,
-        default=EstadoMaterialGeneralChoices.DISPONIBLE,
-        help_text="Estado para otros materiales"
+    estado_general = models.ForeignKey(
+        EstadoMaterialGeneral,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        help_text="Estado para materiales por cantidad"
     )
 
     # Control de origen y nuevos ingresos
@@ -541,10 +729,9 @@ class Material(models.Model):
         default=True,
         help_text="TRUE solo en primera entrada, FALSE en reingresos"
     )
-    tipo_origen = models.CharField(
-        max_length=20,
-        choices=TipoIngresoChoices.choices,
-        default=TipoIngresoChoices.NUEVO,
+    tipo_origen = models.ForeignKey(
+        TipoIngreso,
+        on_delete=models.CASCADE,
         help_text="Tipo de origen del material"
     )
 
@@ -584,10 +771,10 @@ class Material(models.Model):
         verbose_name_plural = 'Materiales'
 
     def __str__(self):
-        if self.tipo_material == TipoMaterialChoices.ONU:
+        if self.tipo_material.es_unico:
             return f"{self.codigo_interno} - {self.modelo.nombre} ({self.mac_address})"
         else:
-            return f"{self.codigo_interno} - {self.modelo.nombre}"
+            return f"{self.codigo_interno} - {self.modelo.nombre} (Cant: {self.cantidad})"
 
     def clean(self):
         """Validaciones específicas por tipo de material"""
@@ -598,10 +785,10 @@ class Material(models.Model):
         if not self.codigo_item_equipo.isdigit():
             raise ValidationError("El código item equipo solo puede contener números")
 
-        # Validaciones específicas para equipos ONU
-        if self.tipo_material == TipoMaterialChoices.ONU:
+        # Validaciones específicas para equipos únicos
+        if self.tipo_material.es_unico:
             if not all([self.mac_address, self.gpon_serial, self.serial_manufacturer]):
-                raise ValidationError("Los equipos ONU requieren MAC Address, GPON Serial y Serial Manufacturer")
+                raise ValidationError("Los equipos únicos requieren MAC Address, GPON Serial y Serial Manufacturer")
 
             # Validar formato de MAC Address
             if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', self.mac_address.upper()):
@@ -612,21 +799,33 @@ class Material(models.Model):
         if not self.codigo_interno:
             self.codigo_interno = self._generar_codigo_interno()
 
-        # Establecer tipo_material basado en el modelo si no está definido
-        if not self.tipo_material and self.modelo:
-            self.tipo_material = self.modelo.tipo_material
-
         # Normalizar MAC Address
         if self.mac_address:
             self.mac_address = self.mac_address.upper().replace('-', ':')
 
         # Asignar estado inicial según tipo de material
-        if self.tipo_material == TipoMaterialChoices.ONU:
-            if not self.estado_onu:
-                if self.es_nuevo and self.tipo_origen == TipoIngresoChoices.NUEVO:
-                    self.estado_onu = EstadoMaterialONUChoices.NUEVO
-                else:
-                    self.estado_onu = EstadoMaterialONUChoices.REINGRESADO
+        if self.tipo_material.es_unico and not self.estado_onu:
+            # Buscar estado por código para equipos únicos
+            if self.es_nuevo:
+                try:
+                    estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+                    self.estado_onu = estado_nuevo
+                except EstadoMaterialONU.DoesNotExist:
+                    pass
+            else:
+                try:
+                    estado_reingresado = EstadoMaterialONU.objects.get(codigo='REINGRESADO', activo=True)
+                    self.estado_onu = estado_reingresado
+                except EstadoMaterialONU.DoesNotExist:
+                    pass
+
+        elif not self.tipo_material.es_unico and not self.estado_general:
+            # Buscar estado por código para materiales generales
+            try:
+                estado_disponible = EstadoMaterialGeneral.objects.get(codigo='DISPONIBLE', activo=True)
+                self.estado_general = estado_disponible
+            except EstadoMaterialGeneral.DoesNotExist:
+                pass
 
         super().save(*args, **kwargs)
 
@@ -634,7 +833,7 @@ class Material(models.Model):
         """Generar código interno único"""
         import uuid
         while True:
-            if self.tipo_material == TipoMaterialChoices.ONU:
+            if self.tipo_material.es_unico:
                 prefijo = "EQ"
             else:
                 prefijo = "MAT"
@@ -646,35 +845,27 @@ class Material(models.Model):
     @property
     def estado_display(self):
         """Obtener estado para mostrar según el tipo de material"""
-        if self.tipo_material == TipoMaterialChoices.ONU:
-            return self.get_estado_onu_display() if self.estado_onu else 'Sin estado'
+        if self.tipo_material.es_unico:
+            return self.estado_onu.nombre if self.estado_onu else 'Sin estado'
         else:
-            return self.get_estado_general_display()
+            return self.estado_general.nombre if self.estado_general else 'Sin estado'
 
     @property
     def requiere_laboratorio(self):
         """Determinar si el material requiere ir a laboratorio"""
-        if self.tipo_material == TipoMaterialChoices.ONU:
+        if self.tipo_material.es_unico:
             return (self.es_nuevo and
-                    self.tipo_origen == TipoIngresoChoices.NUEVO and
-                    self.estado_onu == EstadoMaterialONUChoices.NUEVO)
+                    self.tipo_origen.codigo == 'NUEVO' and
+                    self.estado_onu and self.estado_onu.codigo == 'NUEVO')
         return False
 
     @property
     def puede_traspasar(self):
         """Verificar si el material puede ser traspasado"""
-        estados_no_traspasables = [
-            EstadoMaterialONUChoices.EN_LABORATORIO,
-            EstadoMaterialONUChoices.DEFECTUOSO,
-            EstadoMaterialONUChoices.DADO_DE_BAJA,
-            EstadoMaterialGeneralChoices.DEFECTUOSO,
-            EstadoMaterialGeneralChoices.DADO_DE_BAJA
-        ]
-
-        if self.tipo_material == TipoMaterialChoices.ONU:
-            return self.estado_onu not in estados_no_traspasables
+        if self.tipo_material.es_unico:
+            return self.estado_onu.permite_traspaso if self.estado_onu else False
         else:
-            return self.estado_general not in estados_no_traspasables
+            return self.estado_general.permite_traspaso if self.estado_general else False
 
     @property
     def dias_en_laboratorio(self):
@@ -685,8 +876,13 @@ class Material(models.Model):
 
     def enviar_a_laboratorio(self, usuario=None):
         """Enviar material a laboratorio"""
-        if self.tipo_material == TipoMaterialChoices.ONU:
-            self.estado_onu = EstadoMaterialONUChoices.EN_LABORATORIO
+        if self.tipo_material.es_unico:
+            try:
+                estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+                self.estado_onu = estado_laboratorio
+            except EstadoMaterialONU.DoesNotExist:
+                pass
+
         self.fecha_envio_laboratorio = timezone.now()
         self.save()
 
@@ -694,11 +890,19 @@ class Material(models.Model):
         """Retornar material de laboratorio"""
         self.fecha_retorno_laboratorio = timezone.now()
 
-        if self.tipo_material == TipoMaterialChoices.ONU:
+        if self.tipo_material.es_unico:
             if resultado_exitoso:
-                self.estado_onu = EstadoMaterialONUChoices.DISPONIBLE
+                try:
+                    estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+                    self.estado_onu = estado_disponible
+                except EstadoMaterialONU.DoesNotExist:
+                    pass
             else:
-                self.estado_onu = EstadoMaterialONUChoices.DEFECTUOSO
+                try:
+                    estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+                    self.estado_onu = estado_defectuoso
+                except EstadoMaterialONU.DoesNotExist:
+                    pass
 
         self.save()
 
@@ -729,10 +933,10 @@ class TraspasoAlmacen(models.Model):
     fecha_recepcion = models.DateTimeField(null=True, blank=True, help_text="Fecha y hora de recepción")
 
     # Estado del traspaso
-    estado = models.CharField(
-        max_length=15,
-        choices=EstadoTraspasoChoices.choices,
-        default=EstadoTraspasoChoices.PENDIENTE
+    estado = models.ForeignKey(
+        EstadoTraspaso,
+        on_delete=models.CASCADE,
+        help_text="Estado actual del traspaso"
     )
 
     # Cantidades
@@ -770,21 +974,18 @@ class TraspasoAlmacen(models.Model):
     def __str__(self):
         return f"{self.numero_traspaso} - {self.almacen_origen.codigo} → {self.almacen_destino.codigo}"
 
-    def clean(self):
-        # Validar número de solicitud
-        if not (6 <= len(self.numero_solicitud) <= 10):
-            raise ValidationError("El número de solicitud debe tener entre 6 y 10 dígitos")
-
-        if not self.numero_solicitud.isdigit():
-            raise ValidationError("El número de solicitud solo puede contener números")
-
-        # Validar que origen y destino sean diferentes
-        if self.almacen_origen == self.almacen_destino:
-            raise ValidationError("El almacén origen y destino deben ser diferentes")
-
     def save(self, *args, **kwargs):
         if not self.numero_traspaso:
             self.numero_traspaso = self._generar_numero_traspaso()
+
+        # Asignar estado inicial si no tiene
+        if not self.estado_id:
+            try:
+                estado_pendiente = EstadoTraspaso.objects.get(codigo='PENDIENTE', activo=True)
+                self.estado = estado_pendiente
+            except EstadoTraspaso.DoesNotExist:
+                pass
+
         super().save(*args, **kwargs)
 
     def _generar_numero_traspaso(self):
@@ -794,21 +995,6 @@ class TraspasoAlmacen(models.Model):
             numero = f"TR-{timezone.now().year}-{str(uuid.uuid4().int)[:6]}"
             if not TraspasoAlmacen.objects.filter(numero_traspaso=numero).exists():
                 return numero
-
-    def confirmar_recepcion(self, usuario_recepcion, cantidad_recibida, observaciones=""):
-        """Confirmar recepción del traspaso"""
-        self.usuario_recepcion = usuario_recepcion
-        self.cantidad_recibida = cantidad_recibida
-        self.fecha_recepcion = timezone.now()
-        self.observaciones_recepcion = observaciones
-        self.estado = EstadoTraspasoChoices.RECIBIDO
-        self.save()
-
-        # Actualizar ubicación de materiales
-        for material in self.materiales.all():
-            material.almacen_actual = self.almacen_destino
-            material.traspaso_actual = None
-            material.save()
 
     @property
     def duracion_transito(self):
@@ -854,10 +1040,10 @@ class DevolucionProveedor(models.Model):
                                                   help_text="Número de informe de laboratorio que justifica la devolución")
 
     # Estado de la devolución
-    estado = models.CharField(
-        max_length=15,
-        choices=EstadoDevolucionChoices.choices,
-        default=EstadoDevolucionChoices.PENDIENTE
+    estado = models.ForeignKey(
+        EstadoDevolucion,
+        on_delete=models.CASCADE,
+        help_text="Estado actual de la devolución"
     )
 
     # Fechas
@@ -866,10 +1052,12 @@ class DevolucionProveedor(models.Model):
     fecha_confirmacion = models.DateTimeField(null=True, blank=True)
 
     # Respuesta del proveedor
-    respuesta_proveedor = models.CharField(
-        max_length=15,
-        choices=RespuestaProveedorChoices.choices,
-        default=RespuestaProveedorChoices.PENDIENTE
+    respuesta_proveedor = models.ForeignKey(
+        RespuestaProveedor,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        help_text="Respuesta del proveedor a la devolución"
     )
     observaciones_proveedor = models.TextField(blank=True)
 
@@ -892,6 +1080,15 @@ class DevolucionProveedor(models.Model):
     def save(self, *args, **kwargs):
         if not self.numero_devolucion:
             self.numero_devolucion = self._generar_numero_devolucion()
+
+        # Asignar estado inicial si no tiene
+        if not self.estado_id:
+            try:
+                estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
+                self.estado = estado_pendiente
+            except EstadoDevolucion.DoesNotExist:
+                pass
+
         super().save(*args, **kwargs)
 
     def _generar_numero_devolucion(self):
@@ -1025,3 +1222,186 @@ class EquipoServicio(models.Model):
 
     class Meta:
         db_table = 'almacenes_equipo_servicio'
+
+
+# ========== FUNCIÓN PARA CREAR DATOS INICIALES ==========
+
+def crear_datos_iniciales():
+    """Función para crear todos los datos iniciales del sistema"""
+
+    # 1. Unidades de Medida
+    unidades = [
+        ('PIEZA', 'Pieza', 'pza'),
+        ('UNIDAD', 'Unidad', 'und'),
+        ('METROS', 'Metros', 'm'),
+        ('CAJA', 'Caja', 'cja'),
+        ('ROLLO', 'Rollo', 'rll'),
+        ('KIT', 'Kit', 'kit'),
+        ('PAQUETE', 'Paquete', 'pqt'),
+    ]
+
+    for codigo, nombre, simbolo in unidades:
+        UnidadMedida.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'simbolo': simbolo, 'orden': len(unidades)}
+        )
+
+    # 2. Tipos de Ingreso
+    tipos_ingreso = [
+        ('NUEVO', 'Nuevo', 'Ingreso de materiales nuevos'),
+        ('REINGRESO', 'Reingreso', 'Reingreso de materiales devueltos'),
+        ('DEVOLUCION', 'Devolución', 'Devolución de materiales de campo'),
+        ('LABORATORIO', 'Laboratorio', 'Materiales provenientes de laboratorio'),
+    ]
+
+    for i, (codigo, nombre, desc) in enumerate(tipos_ingreso):
+        TipoIngreso.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'descripcion': desc, 'orden': i}
+        )
+
+    # 3. Estados de Lote
+    estados_lote = [
+        ('REGISTRADO', 'Registrado', '#9CA3AF', False),
+        ('PENDIENTE_RECEPCION', 'Pendiente Recepción', '#F59E0B', False),
+        ('RECEPCION_PARCIAL', 'Recepción Parcial', '#3B82F6', False),
+        ('RECEPCION_COMPLETA', 'Recepción Completa', '#10B981', False),
+        ('ACTIVO', 'Activo', '#059669', False),
+        ('CERRADO', 'Cerrado', '#6B7280', True),
+    ]
+
+    for i, (codigo, nombre, color, es_final) in enumerate(estados_lote):
+        EstadoLote.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
+        )
+
+    # 4. Estados de Traspaso
+    estados_traspaso = [
+        ('PENDIENTE', 'Pendiente', '#F59E0B', False),
+        ('EN_TRANSITO', 'En Tránsito', '#3B82F6', False),
+        ('RECIBIDO', 'Recibido', '#10B981', True),
+        ('CANCELADO', 'Cancelado', '#EF4444', True),
+    ]
+
+    for i, (codigo, nombre, color, es_final) in enumerate(estados_traspaso):
+        EstadoTraspaso.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
+        )
+
+    # 5. Estados de Material ONU
+    estados_onu = [
+        ('NUEVO', 'Nuevo', '#9CA3AF', False, False),
+        ('DISPONIBLE', 'Disponible', '#10B981', True, True),
+        ('RESERVADO', 'Reservado', '#F59E0B', False, True),
+        ('ASIGNADO', 'Asignado', '#3B82F6', False, False),
+        ('INSTALADO', 'Instalado', '#8B5CF6', False, False),
+        ('EN_LABORATORIO', 'En Laboratorio', '#F97316', False, False),
+        ('DEFECTUOSO', 'Defectuoso', '#EF4444', False, False),
+        ('DEVUELTO_PROVEEDOR', 'Devuelto a Proveedor', '#6B7280', False, False),
+        ('REINGRESADO', 'Reingresado', '#06B6D4', True, True),
+        ('DADO_DE_BAJA', 'Dado de Baja', '#374151', False, False),
+    ]
+
+    for i, (codigo, nombre, color, permite_asig, permite_tras) in enumerate(estados_onu):
+        EstadoMaterialONU.objects.get_or_create(
+            codigo=codigo,
+            defaults={
+                'nombre': nombre,
+                'color': color,
+                'permite_asignacion': permite_asig,
+                'permite_traspaso': permite_tras,
+                'orden': i
+            }
+        )
+
+    # 6. Estados de Material General
+    estados_general = [
+        ('DISPONIBLE', 'Disponible', '#10B981', True, True),
+        ('RESERVADO', 'Reservado', '#F59E0B', False, True),
+        ('ASIGNADO', 'Asignado', '#3B82F6', False, False),
+        ('CONSUMIDO', 'Consumido', '#6B7280', False, False),
+        ('DEFECTUOSO', 'Defectuoso', '#EF4444', False, False),
+        ('DADO_DE_BAJA', 'Dado de Baja', '#374151', False, False),
+    ]
+
+    for i, (codigo, nombre, color, permite_cons, permite_tras) in enumerate(estados_general):
+        EstadoMaterialGeneral.objects.get_or_create(
+            codigo=codigo,
+            defaults={
+                'nombre': nombre,
+                'color': color,
+                'permite_consumo': permite_cons,
+                'permite_traspaso': permite_tras,
+                'orden': i
+            }
+        )
+
+    # 7. Tipos de Almacén
+    tipos_almacen = [
+        ('PRINCIPAL', 'Principal'),
+        ('REGIONAL', 'Regional'),
+        ('TEMPORAL', 'Temporal'),
+    ]
+
+    for i, (codigo, nombre) in enumerate(tipos_almacen):
+        TipoAlmacen.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'orden': i}
+        )
+
+    # 8. Estados de Devolución
+    estados_devolucion = [
+        ('PENDIENTE', 'Pendiente', '#F59E0B', False),
+        ('ENVIADO', 'Enviado', '#3B82F6', False),
+        ('CONFIRMADO', 'Confirmado', '#10B981', True),
+        ('RECHAZADO', 'Rechazado', '#EF4444', True),
+    ]
+
+    for i, (codigo, nombre, color, es_final) in enumerate(estados_devolucion):
+        EstadoDevolucion.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
+        )
+
+    # 9. Respuestas de Proveedor
+    respuestas = [
+        ('REPOSICION', 'Reposición'),
+        ('CREDITO', 'Crédito'),
+        ('RECHAZO', 'Rechazo'),
+        ('PENDIENTE', 'Pendiente'),
+    ]
+
+    for i, (codigo, nombre) in enumerate(respuestas):
+        RespuestaProveedor.objects.get_or_create(
+            codigo=codigo,
+            defaults={'nombre': nombre, 'orden': i}
+        )
+
+    # 10. Tipos de Material
+    unidad_pieza = UnidadMedida.objects.get(codigo='PIEZA')
+    unidad_metros = UnidadMedida.objects.get(codigo='METROS')
+
+    tipos_material = [
+        ('ONU', 'Equipo ONU', 'Equipos de red de fibra óptica (ONUs)', unidad_pieza, True, True),
+        ('CABLE_DROP', 'Cable Drop', 'Cable de fibra óptica para conexión domiciliaria', unidad_metros, False, False),
+        ('CONECTOR_APC', 'Conector APC', 'Conectores ópticos tipo APC', unidad_pieza, False, False),
+        ('CONECTOR_UPC', 'Conector UPC', 'Conectores ópticos tipo UPC', unidad_pieza, False, False),
+        ('ROSETA_OPTICA', 'Roseta Óptica', 'Rosetas para instalación óptica domiciliaria', unidad_pieza, False, False),
+        ('PATCH_CORE', 'Patch Core', 'Cables patch para core de red', unidad_pieza, False, False),
+        ('TRIPLEXOR', 'Triplexor', 'Dispositivos triplexores para red óptica', unidad_pieza, False, False),
+    ]
+
+    for i, (codigo, nombre, desc, unidad, inspeccion, es_unico) in enumerate(tipos_material):
+        TipoMaterial.objects.get_or_create(
+            codigo=codigo,
+            defaults={
+                'nombre': nombre,
+                'descripcion': desc,
+                'unidad_medida_default': unidad,
+                'requiere_inspeccion_inicial': inspeccion,
+                'es_unico': es_unico,
+                'orden': i
+            }
+        )
