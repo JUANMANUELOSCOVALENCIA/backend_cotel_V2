@@ -1,5 +1,5 @@
 # ======================================================
-# almacenes/views/reporte_views.py
+# almacenes/views/reporte_views.py - CORREGIDO
 # Views para estadísticas, reportes y dashboards
 # ======================================================
 
@@ -17,7 +17,8 @@ from ..models import (
     TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral,
     EstadoLote, EstadoTraspaso, EstadoDevolucion
 )
-from ..serializers import EstadisticasGeneralesSerializer
+# EstadisticasGeneralesSerializer se usa solo para documentación
+# Las estadísticas se construyen directamente en las views
 
 
 class EstadisticasGeneralesView(APIView):

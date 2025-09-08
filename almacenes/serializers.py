@@ -1,5 +1,5 @@
 # ======================================================
-# apps/almacenes/serializers.py - ACTUALIZADOS SIN TEXTCHOICES
+# apps/almacenes/serializers.py - COMPLETO SIN TEXTCHOICES
 # Serializers completos para React con objetos completos
 # ======================================================
 
@@ -9,6 +9,7 @@ from decimal import Decimal
 import pandas as pd
 import re
 from io import BytesIO
+from django.utils import timezone
 
 from .models import (
     # Modelos base
@@ -251,6 +252,19 @@ class ComponenteSerializer(serializers.ModelSerializer):
         return obj.modelocomponente_set.filter(modelo__activo=True).count()
 
 
+class EstadoEquipoSerializer(serializers.ModelSerializer):
+    """Serializer para compatibilidad con el modelo EstadoEquipo legacy"""
+    equipos_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EstadoEquipo
+        fields = ['id', 'nombre', 'descripcion', 'activo', 'equipos_count', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_equipos_count(self, obj):
+        return obj.equipoonu_set.count()
+
+
 class ModeloComponenteSerializer(serializers.ModelSerializer):
     componente_info = serializers.SerializerMethodField()
 
@@ -263,8 +277,6 @@ class ModeloComponenteSerializer(serializers.ModelSerializer):
             'id': obj.componente.id,
             'nombre': obj.componente.nombre
         }
-
-
 class ModeloSerializer(serializers.ModelSerializer):
     # Información completa de relaciones ForeignKey
     marca_info = serializers.SerializerMethodField()
@@ -562,8 +574,6 @@ class LoteCreateSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         return LoteSerializer(instance).data
-
-
 # ========== SERIALIZERS DEL MODELO MATERIAL UNIFICADO ==========
 
 class MaterialSerializer(serializers.ModelSerializer):
@@ -1332,7 +1342,243 @@ class CambioEstadoMaterialSerializer(serializers.Serializer):
         return material
 
 
+# ========== SERIALIZER PARA IMPORTACIÓN MASIVA ==========
+
+class ImportacionMasivaSerializer(serializers.Serializer):
+    """Serializer para importación masiva de equipos desde archivo Excel/CSV"""
+
+    archivo = serializers.FileField(
+        help_text="Archivo Excel (.xlsx) o CSV con datos de equipos"
+    )
+    lote_id = serializers.IntegerField(
+        help_text="ID del lote al que pertenecen los equipos"
+    )
+    modelo_id = serializers.IntegerField(
+        help_text="ID del modelo de los equipos a importar"
+    )
+    validar_solo = serializers.BooleanField(
+        default=False,
+        help_text="Solo validar sin importar (preview)"
+    )
+
+    def validate_archivo(self, value):
+        """Validar archivo subido"""
+        # Verificar tamaño (máximo 5MB)
+        if value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError("El archivo no puede ser mayor a 5MB")
+
+        # Verificar extensión
+        nombre = value.name.lower()
+        if not (nombre.endswith('.xlsx') or nombre.endswith('.csv')):
+            raise serializers.ValidationError("Solo se permiten archivos .xlsx o .csv")
+
+        return value
+
+    def validate_lote_id(self, value):
+        """Validar que el lote existe y está activo"""
+        try:
+            lote = Lote.objects.get(id=value)
+
+            # Verificar que el lote no esté cerrado
+            try:
+                estado_cerrado = EstadoLote.objects.get(codigo='CERRADO', activo=True)
+                if lote.estado == estado_cerrado:
+                    raise serializers.ValidationError("No se puede importar a un lote cerrado")
+            except EstadoLote.DoesNotExist:
+                pass
+
+            return value
+        except Lote.DoesNotExist:
+            raise serializers.ValidationError("El lote especificado no existe")
+
+    def validate_modelo_id(self, value):
+        """Validar que el modelo existe y es de tipo ONU"""
+        try:
+            modelo = Modelo.objects.get(id=value, activo=True)
+
+            # Verificar que sea tipo ONU (equipo único)
+            if not modelo.tipo_material.es_unico:
+                raise serializers.ValidationError("Solo se pueden importar equipos únicos (ONUs)")
+
+            return value
+        except Modelo.DoesNotExist:
+            raise serializers.ValidationError("El modelo especificado no existe o no está activo")
+
+    def procesar_importacion(self):
+        """Procesar el archivo de importación"""
+        archivo = self.validated_data['archivo']
+        lote_id = self.validated_data['lote_id']
+        modelo_id = self.validated_data['modelo_id']
+        validar_solo = self.validated_data['validar_solo']
+
+        # Leer archivo según extensión
+        try:
+            if archivo.name.lower().endswith('.xlsx'):
+                df = pd.read_excel(archivo)
+            else:  # CSV
+                df = pd.read_csv(archivo)
+        except Exception as e:
+            raise serializers.ValidationError(f"Error leyendo archivo: {str(e)}")
+
+        # Validar columnas requeridas
+        columnas_requeridas = ['MAC', 'GPON_SN', 'D_SN', 'ITEM_EQUIPO']
+        # Validar columnas requeridas
+        columnas_requeridas = ['MAC', 'GPON_SN', 'D_SN', 'ITEM_EQUIPO']
+        columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+
+        if columnas_faltantes:
+            raise serializers.ValidationError(
+                f"Columnas faltantes: {', '.join(columnas_faltantes)}"
+            )
+
+        # Limpiar y validar datos
+        resultados = {
+            'validados': 0,
+            'errores': 0,
+            'importados': 0,
+            'detalles_errores': [],
+            'equipos_validos': []
+        }
+
+        lote = Lote.objects.get(id=lote_id)
+        modelo = Modelo.objects.get(id=modelo_id)
+
+        equipos_validos = []
+
+        for index, row in df.iterrows():
+            fila_num = index + 2  # +2 porque pandas es 0-indexed y hay header
+            errores_fila = []
+
+            # Extraer y limpiar datos
+            mac = str(row['MAC']).strip().upper() if pd.notna(row['MAC']) else ''
+            gpon_sn = str(row['GPON_SN']).strip() if pd.notna(row['GPON_SN']) else ''
+            d_sn = str(row['D_SN']).strip() if pd.notna(row['D_SN']) else ''
+            item_equipo = str(row['ITEM_EQUIPO']).strip() if pd.notna(row['ITEM_EQUIPO']) else ''
+
+            # Validar campos requeridos
+            if not mac:
+                errores_fila.append("MAC Address requerido")
+            if not gpon_sn:
+                errores_fila.append("GPON Serial requerido")
+            if not d_sn:
+                errores_fila.append("D-SN requerido")
+            if not item_equipo:
+                errores_fila.append("Item Equipo requerido")
+
+            # Validar formato MAC
+            # Validar MAC Address
+            if mac and not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', mac):
+                errores_fila.append("Formato de MAC inválido")
+            else:
+                # Normalizar MAC
+                if mac:
+                    mac = mac.replace('-', ':')
+
+            # Validar Item Equipo
+            if item_equipo and (not item_equipo.isdigit() or not (6 <= len(item_equipo) <= 10)):
+                errores_fila.append("Item Equipo debe tener 6-10 dígitos")
+
+            # Validar unicidad
+            if mac:
+                if Material.objects.filter(mac_address=mac).exists():
+                    errores_fila.append(f"MAC {mac} ya existe en el sistema")
+
+            if gpon_sn:
+                if Material.objects.filter(gpon_serial=gpon_sn).exists():
+                    errores_fila.append(f"GPON Serial {gpon_sn} ya existe")
+
+            if d_sn:
+                if Material.objects.filter(serial_manufacturer=d_sn).exists():
+                    errores_fila.append(f"D-SN {d_sn} ya existe")
+
+            # Registrar resultados
+            if errores_fila:
+                resultados['errores'] += 1
+                resultados['detalles_errores'].append({
+                    'fila': fila_num,
+                    'mac': mac,
+                    'errores': errores_fila
+                })
+            else:
+                resultados['validados'] += 1
+                equipos_validos.append({
+                    'mac_address': mac,
+                    'gpon_serial': gpon_sn,
+                    'serial_manufacturer': d_sn,
+                    'codigo_item_equipo': item_equipo
+                })
+
+            # Si solo es validación, retornar resultados
+            if validar_solo:
+                resultados['equipos_validos'] = equipos_validos
+            return resultados
+
+        # Si hay errores, no importar nada
+        if resultados['errores'] > 0:
+            raise serializers.ValidationError({
+                'errores_validacion': resultados['detalles_errores'],
+                'total_errores': resultados['errores']
+            })
+
+        # Proceder con la importación
+        try:
+            # Obtener estados necesarios
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+            tipo_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
+
+            with transaction.atomic():
+                for equipo_data in equipos_validos:
+                    material = Material.objects.create(
+                        tipo_material=tipo_onu,
+                        modelo=modelo,
+                        tipo_equipo=modelo.tipo_equipo,
+                        lote=lote,
+                        mac_address=equipo_data['mac_address'],
+                        gpon_serial=equipo_data['gpon_serial'],
+                        serial_manufacturer=equipo_data['serial_manufacturer'],
+                        codigo_item_equipo=equipo_data['codigo_item_equipo'],
+                        almacen_actual=lote.almacen_destino,
+                        estado_onu=estado_nuevo,
+                        es_nuevo=True,
+                        tipo_origen=tipo_nuevo,
+                        cantidad=1.00
+                    )
+                    resultados['importados'] += 1
+
+                # Actualizar estado del lote si es necesario
+                try:
+                    if lote.cantidad_recibida >= lote.cantidad_total:
+                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
+                        lote.estado = estado_completa
+                    else:
+                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
+                        lote.estado = estado_parcial
+                    lote.save()
+                except EstadoLote.DoesNotExist:
+                    pass
+
+        except Exception as e:
+            raise serializers.ValidationError(f"Error durante la importación: {str(e)}")
+
+        return resultados
+
+
 # ========== SERIALIZERS PARA ENDPOINTS ESPECIALES ==========
+
+class EstadisticasGeneralesSerializer(serializers.Serializer):
+    """Serializer para estadísticas generales - solo para documentación de la API"""
+
+    total_almacenes = serializers.IntegerField(read_only=True)
+    total_proveedores = serializers.IntegerField(read_only=True)
+    total_lotes = serializers.IntegerField(read_only=True)
+    total_materiales = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        # Este serializer no se asocia a un modelo específico
+        # Se usa solo para estructurar la respuesta de estadísticas
+        pass
+
 
 class ListaOpcionesSerializer(serializers.Serializer):
     """Serializer para endpoints que devuelven listas de opciones para React"""
