@@ -22,7 +22,7 @@ from ..models import (
 from ..serializers import (
     LoteSerializer, LoteCreateSerializer, LoteDetalleSerializer,
     EntregaParcialLoteSerializer,
-    MaterialListSerializer
+    MaterialListSerializer, ImportacionMasivaSerializer
 )
 
 

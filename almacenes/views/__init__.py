@@ -55,7 +55,7 @@ from .compatibility_views import (
     ComponenteViewSet
 )
 
-# NUEVAS Views para modelos de choices
+# AGREGAR ESTAS IMPORTACIONES - Views para modelos de choices
 from .choices_views import (
     TipoIngresoViewSet,
     EstadoLoteViewSet,
@@ -111,7 +111,7 @@ __all__ = [
     'EstadoEquipoViewSet',
     'ComponenteViewSet',
 
-    # NUEVAS Views para modelos de choices
+    # AGREGAR ESTAS EXPORTACIONES - Views para modelos de choices
     'TipoIngresoViewSet',
     'EstadoLoteViewSet',
     'EstadoTraspasoViewSet',
