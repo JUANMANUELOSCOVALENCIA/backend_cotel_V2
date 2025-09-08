@@ -1,7 +1,6 @@
 # ======================================================
 # almacenes/views/lote_views.py - ACTUALIZADO SIN TEXTCHOICES
 # Views para gestión de lotes y importación masiva
-#ImportacionMasivaSerializer
 # ======================================================
 
 from django.db import transaction
