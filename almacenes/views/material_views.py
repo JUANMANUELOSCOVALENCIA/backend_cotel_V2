@@ -1,529 +1,221 @@
-# ======================================================
-# almacenes/views/material_views.py - ACTUALIZADO SIN TEXTCHOICES
-# Views para gestión del modelo Material unificado
-# ======================================================
-
-from django.db.models import Q, Count
-from django.db import transaction
-from rest_framework import viewsets, status, filters
+from django.db.models import Q
+from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django_filters import rest_framework as django_filters
 
 from usuarios.permissions import GenericRolePermission
-from ..models import (
-    Material, HistorialMaterial,
-    # Modelos de choices (antes TextChoices)
-    TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral, TipoIngreso
-)
-from ..serializers import (
-    MaterialSerializer, MaterialListSerializer, HistorialMaterialSerializer,
-    CambioEstadoMaterialSerializer, LaboratorioOperacionSerializer
-)
+from .. import models
+from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, Modelo
+from ..serializers import MaterialListSerializer, MaterialDetailSerializer
+
+
+class MaterialFilter(django_filters.FilterSet):
+    """Filtros personalizados para materiales"""
+
+    # Filtros de texto con búsqueda parcial
+    codigo_interno = django_filters.CharFilter(lookup_expr='icontains')
+    mac_address = django_filters.CharFilter(lookup_expr='icontains')
+    gpon_serial = django_filters.CharFilter(lookup_expr='icontains')
+    serial_manufacturer = django_filters.CharFilter(lookup_expr='icontains')
+    codigo_item_equipo = django_filters.CharFilter(lookup_expr='icontains')
+
+    # Filtros por relaciones
+    lote_numero = django_filters.CharFilter(field_name='lote__numero_lote', lookup_expr='icontains')
+    almacen_codigo = django_filters.CharFilter(field_name='almacen_actual__codigo', lookup_expr='icontains')
+    modelo_nombre = django_filters.CharFilter(field_name='modelo__nombre', lookup_expr='icontains')
+    marca_nombre = django_filters.CharFilter(field_name='modelo__marca__nombre', lookup_expr='icontains')
+
+    # Filtros por fechas
+    fecha_desde = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
+    fecha_hasta = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
+
+    # Filtros booleanos
+    es_nuevo = django_filters.BooleanFilter()
+
+    def filter_tipo_material(self, queryset, name, value):
+        """Filtro personalizado para tipo_material"""
+        if value:
+            try:
+                tipo = TipoMaterial.objects.get(codigo=value, activo=True)
+                return queryset.filter(tipo_material=tipo)
+            except TipoMaterial.DoesNotExist:
+                return queryset.none()
+        return queryset
+
+    class Meta:
+        model = Material
+        fields = {
+            'lote': ['exact'],
+            'almacen_actual': ['exact'],
+            'modelo': ['exact'],
+            'estado_onu': ['exact'],
+            'tipo_origen': ['exact'],
+        }
 
 
 class MaterialViewSet(viewsets.ModelViewSet):
-    """ViewSet para gestión completa del modelo Material unificado (ONU + otros)"""
-    queryset = Material.objects.all().select_related(
-        'modelo__marca', 'tipo_equipo', 'lote__proveedor',
-        'almacen_actual', 'traspaso_actual', 'tipo_material',
-        'estado_onu', 'estado_general', 'tipo_origen'
-    )
+    """ViewSet para gestión de materiales (ONUs y otros)"""
+    queryset = Material.objects.select_related(
+        'modelo__marca', 'modelo__tipo_equipo', 'lote', 'almacen_actual',
+        'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen'
+    ).order_by('-created_at')
+
     permission_classes = [IsAuthenticated, GenericRolePermission]
     basename = 'materiales'
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = [
-        'tipo_material', 'modelo', 'modelo__marca', 'modelo__tipo_equipo',
-        'lote', 'almacen_actual', 'estado_onu', 'estado_general',
-        'es_nuevo', 'tipo_origen'
-    ]
+    filterset_class = MaterialFilter
+
     search_fields = [
         'codigo_interno', 'mac_address', 'gpon_serial', 'serial_manufacturer',
-        'codigo_item_equipo'
+        'codigo_item_equipo', 'lote__numero_lote', 'modelo__nombre'
     ]
-    ordering_fields = ['codigo_interno', 'created_at']
-    ordering = ['-created_at']
+
+    ordering_fields = [
+        'created_at', 'codigo_interno', 'mac_address', 'gpon_serial',
+        'lote__numero_lote', 'almacen_actual__codigo'
+    ]
 
     def get_serializer_class(self):
-        if self.action == 'list':
-            return MaterialListSerializer
-        return MaterialSerializer
+        if self.action == 'retrieve':
+            return MaterialDetailSerializer
+        return MaterialListSerializer
 
     def get_queryset(self):
-        """Filtros adicionales dinámicos"""
         queryset = super().get_queryset()
 
-        # Filtro por disponibilidad
-        disponible = self.request.query_params.get('disponible')
-        if disponible == 'true':
-            queryset = queryset.filter(
-                Q(tipo_material__es_unico=True, estado_onu__permite_asignacion=True) |
-                Q(tipo_material__es_unico=False, estado_general__permite_consumo=True)
-            )
-
-        # Filtro por materiales en laboratorio
-        en_laboratorio = self.request.query_params.get('en_laboratorio')
-        if en_laboratorio == 'true':
+        # Filtro por tipo de material (solo ONUs por defecto)
+        tipo_material = self.request.query_params.get('tipo_material', 'ONU')
+        if tipo_material:
             try:
-                estado_lab = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
-                queryset = queryset.filter(
-                    tipo_material__es_unico=True,
-                    estado_onu=estado_lab
-                )
-            except EstadoMaterialONU.DoesNotExist:
-                queryset = queryset.none()
-
-        # Filtro por materiales defectuosos
-        defectuoso = self.request.query_params.get('defectuoso')
-        if defectuoso == 'true':
-            try:
-                estado_def_onu = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
-                estado_def_gen = EstadoMaterialGeneral.objects.get(codigo='DEFECTUOSO', activo=True)
-                queryset = queryset.filter(
-                    Q(tipo_material__es_unico=True, estado_onu=estado_def_onu) |
-                    Q(tipo_material__es_unico=False, estado_general=estado_def_gen)
-                )
-            except (EstadoMaterialONU.DoesNotExist, EstadoMaterialGeneral.DoesNotExist):
-                queryset = queryset.none()
-
-        # Filtro por materiales nuevos que requieren laboratorio
-        requiere_laboratorio = self.request.query_params.get('requiere_laboratorio')
-        if requiere_laboratorio == 'true':
-            try:
-                tipo_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
-                estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
-                queryset = queryset.filter(
-                    tipo_material__es_unico=True,
-                    es_nuevo=True,
-                    tipo_origen=tipo_nuevo,
-                    estado_onu=estado_nuevo
-                )
-            except (TipoIngreso.DoesNotExist, EstadoMaterialONU.DoesNotExist):
-                queryset = queryset.none()
+                tipo = TipoMaterial.objects.get(codigo=tipo_material, activo=True)
+                queryset = queryset.filter(tipo_material=tipo)
+            except TipoMaterial.DoesNotExist:
+                pass
 
         return queryset
 
-    @action(detail=True, methods=['get'])
-    def historial(self, request, pk=None):
-        """Obtener historial completo de cambios del material"""
-        material = self.get_object()
-        historial = material.historial.all().order_by('-fecha_cambio')
+    @action(detail=False, methods=['get'])
+    def estadisticas(self, request):
+        """Estadísticas de materiales"""
+        queryset = self.filter_queryset(self.get_queryset())
 
-        serializer = HistorialMaterialSerializer(historial, many=True)
+        # Estadísticas por estado
+        estados_stats = {}
+        for estado in EstadoMaterialONU.objects.filter(activo=True):
+            count = queryset.filter(estado_onu=estado).count()
+            estados_stats[estado.nombre] = count
+
+        # Estadísticas por almacén
+        almacenes_stats = {}
+        for almacen in Almacen.objects.filter(activo=True):
+            count = queryset.filter(almacen_actual=almacen).count()
+            if count > 0:
+                almacenes_stats[almacen.nombre] = count
+
+        # Estadísticas por lote
+        lotes_stats = queryset.values(
+            'lote__numero_lote'
+        ).annotate(
+            count=models.Count('id')
+        ).order_by('-count')[:10]
+
         return Response({
-            'material': {
-                'id': material.id,
-                'codigo_interno': material.codigo_interno,
-                'tipo_material': material.tipo_material.nombre if material.tipo_material else 'Sin tipo',
-                'modelo': f"{material.modelo.marca.nombre} {material.modelo.nombre}"
-            },
-            'historial': serializer.data
+            'total': queryset.count(),
+            'por_estado': estados_stats,
+            'por_almacen': almacenes_stats,
+            'top_lotes': list(lotes_stats),
+            'nuevos': queryset.filter(es_nuevo=True).count(),
+            'reingresados': queryset.filter(es_nuevo=False).count(),
         })
+
+    @action(detail=False, methods=['get'])
+    def solo_onus(self, request):
+        """Obtener solo equipos ONUs"""
+        try:
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            queryset = self.get_queryset().filter(tipo_material=tipo_onu)
+
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+        except TipoMaterial.DoesNotExist:
+            return Response([], status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def cambiar_estado(self, request, pk=None):
-        """Cambiar estado del material con registro en historial"""
+        """Cambiar estado de un material"""
         material = self.get_object()
+        nuevo_estado_id = request.data.get('estado_id')
 
-        data = request.data.copy()
-        data['material_id'] = material.id
-
-        serializer = CambioEstadoMaterialSerializer(
-            data=data,
-            context={'request': request}
-        )
-
-        if serializer.is_valid():
-            material_actualizado = serializer.ejecutar_cambio()
-
-            return Response({
-                'message': 'Estado cambiado correctamente',
-                'material': MaterialSerializer(material_actualizado).data
-            })
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=True, methods=['post'])
-    def enviar_laboratorio(self, request, pk=None):
-        """Enviar material específico a laboratorio"""
-        material = self.get_object()
-
-        if not material.tipo_material.es_unico:
+        if not nuevo_estado_id:
             return Response(
-                {'error': 'Solo los equipos únicos pueden enviarse a laboratorio'},
+                {'error': 'estado_id es requerido'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            estado_lab = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
-            if material.estado_onu == estado_lab:
-                return Response(
-                    {'error': 'El material ya está en laboratorio'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except EstadoMaterialONU.DoesNotExist:
-            return Response(
-                {'error': 'Estado de laboratorio no configurado'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            if material.tipo_material.es_unico:
+                nuevo_estado = EstadoMaterialONU.objects.get(id=nuevo_estado_id, activo=True)
+                material.estado_onu = nuevo_estado
+            else:
+                from ..models import EstadoMaterialGeneral
+                nuevo_estado = EstadoMaterialGeneral.objects.get(id=nuevo_estado_id, activo=True)
+                material.estado_general = nuevo_estado
 
-        data = {
-            'material_id': material.id,
-            'accion': 'enviar',
-            'observaciones': request.data.get('observaciones', '')
-        }
-
-        serializer = LaboratorioOperacionSerializer(data=data)
-        if serializer.is_valid():
-            material_actualizado = serializer.ejecutar_operacion()
+            material.save()
 
             return Response({
-                'message': f'Material {material.codigo_interno} enviado a laboratorio',
-                'material': MaterialSerializer(material_actualizado).data
+                'message': f'Estado cambiado a {nuevo_estado.nombre}',
+                'nuevo_estado': nuevo_estado.nombre
             })
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=True, methods=['post'])
-    def retornar_laboratorio(self, request, pk=None):
-        """Retornar material de laboratorio con informe"""
-        material = self.get_object()
-
-        try:
-            estado_lab = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
-            if material.estado_onu != estado_lab:
-                return Response(
-                    {'error': 'El material no está en laboratorio'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except EstadoMaterialONU.DoesNotExist:
+        except (EstadoMaterialONU.DoesNotExist, EstadoMaterialGeneral.DoesNotExist):
             return Response(
-                {'error': 'Estado de laboratorio no configurado'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': 'Estado no encontrado'},
+                status=status.HTTP_404_NOT_FOUND
             )
-
-        data = request.data.copy()
-        data['material_id'] = material.id
-        data['accion'] = 'retornar'
-
-        serializer = LaboratorioOperacionSerializer(data=data)
-        if serializer.is_valid():
-            material_actualizado = serializer.ejecutar_operacion()
-
-            return Response({
-                'message': f'Material {material.codigo_interno} retornado de laboratorio',
-                'resultado': 'Exitoso' if serializer.validated_data['resultado_exitoso'] else 'Defectuoso',
-                'material': MaterialSerializer(material_actualizado).data
-            })
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'])
     def busqueda_avanzada(self, request):
         """Búsqueda avanzada con múltiples criterios"""
-        criterios = request.data
         queryset = self.get_queryset()
 
-        # Filtros de búsqueda avanzada
-        if criterios.get('mac_contains'):
-            queryset = queryset.filter(mac_address__icontains=criterios['mac_contains'])
+        # Aplicar filtros del request
+        filtros = Q()
 
-        if criterios.get('serial_contains'):
-            queryset = queryset.filter(
-                Q(gpon_serial__icontains=criterios['serial_contains']) |
-                Q(serial_manufacturer__icontains=criterios['serial_contains'])
+        if request.data.get('texto_busqueda'):
+            texto = request.data['texto_busqueda']
+            filtros |= (
+                    Q(codigo_interno__icontains=texto) |
+                    Q(mac_address__icontains=texto) |
+                    Q(gpon_serial__icontains=texto) |
+                    Q(serial_manufacturer__icontains=texto) |
+                    Q(lote__numero_lote__icontains=texto)
             )
 
-        if criterios.get('fecha_desde'):
-            queryset = queryset.filter(created_at__gte=criterios['fecha_desde'])
+        if request.data.get('lote_ids'):
+            filtros &= Q(lote_id__in=request.data['lote_ids'])
 
-        if criterios.get('fecha_hasta'):
-            queryset = queryset.filter(created_at__lte=criterios['fecha_hasta'])
+        if request.data.get('almacen_ids'):
+            filtros &= Q(almacen_actual_id__in=request.data['almacen_ids'])
 
-        if criterios.get('solo_defectuosos'):
-            try:
-                estado_def_onu = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
-                estado_def_gen = EstadoMaterialGeneral.objects.get(codigo='DEFECTUOSO', activo=True)
-                queryset = queryset.filter(
-                    Q(estado_onu=estado_def_onu) |
-                    Q(estado_general=estado_def_gen)
-                )
-            except (EstadoMaterialONU.DoesNotExist, EstadoMaterialGeneral.DoesNotExist):
-                queryset = queryset.none()
+        if request.data.get('estado_ids'):
+            filtros &= Q(estado_onu_id__in=request.data['estado_ids'])
 
-        # Paginación
+        queryset = queryset.filter(filtros)
+
         page = self.paginate_queryset(queryset)
         if page is not None:
-            serializer = MaterialListSerializer(page, many=True)
+            serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
 
-        serializer = MaterialListSerializer(queryset, many=True)
+        serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def estadisticas(self, request):
-        """Estadísticas generales de materiales"""
-        total_materiales = Material.objects.count()
-
-        # Por tipo de material usando el nuevo modelo
-        por_tipo = {}
-        tipos = TipoMaterial.objects.filter(activo=True)
-        for tipo in tipos:
-            count = Material.objects.filter(tipo_material=tipo).count()
-            por_tipo[tipo.nombre] = count
-
-        # Estados de equipos únicos
-        estados_onu = {}
-        estados_onu_obj = EstadoMaterialONU.objects.filter(activo=True)
-        for estado in estados_onu_obj:
-            count = Material.objects.filter(
-                tipo_material__es_unico=True,
-                estado_onu=estado
-            ).count()
-            estados_onu[estado.nombre] = count
-
-        # Estados de materiales generales
-        estados_general = {}
-        estados_general_obj = EstadoMaterialGeneral.objects.filter(activo=True)
-        for estado in estados_general_obj:
-            count = Material.objects.filter(
-                tipo_material__es_unico=False,
-                estado_general=estado
-            ).count()
-            estados_general[estado.nombre] = count
-
-        # Por almacén
-        por_almacen = Material.objects.values(
-            'almacen_actual__codigo', 'almacen_actual__nombre'
-        ).annotate(
-            total=Count('id')
-        ).order_by('-total')
-
-        # Materiales más antiguos
-        antiguos = Material.objects.order_by('created_at')[:10]
-
-        # Materiales en laboratorio hace más de 30 días
-        from datetime import datetime, timedelta
-        hace_30_dias = datetime.now() - timedelta(days=30)
-
-        try:
-            estado_lab = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
-            laboratorio_antiguos = Material.objects.filter(
-                estado_onu=estado_lab,
-                fecha_envio_laboratorio__lt=hace_30_dias
-            ).count()
-        except EstadoMaterialONU.DoesNotExist:
-            laboratorio_antiguos = 0
-
-        return Response({
-            'totales': {
-                'total_materiales': total_materiales,
-                'por_tipo': por_tipo,
-                'estados_onu': estados_onu,
-                'estados_general': estados_general
-            },
-            'distribucion': {
-                'por_almacen': list(por_almacen)
-            },
-            'alertas': {
-                'materiales_antiguos': MaterialListSerializer(antiguos, many=True).data,
-                'en_laboratorio_mas_30_dias': laboratorio_antiguos
-            }
-        })
-
-    @action(detail=False, methods=['get'])
-    def disponibles_para_asignacion(self, request):
-        """Materiales disponibles para asignación a órdenes de trabajo"""
-        # Filtrar solo materiales disponibles usando los nuevos modelos
-        try:
-            estado_disp_onu = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
-            estado_disp_gen = EstadoMaterialGeneral.objects.get(codigo='DISPONIBLE', activo=True)
-
-            materiales = Material.objects.filter(
-                Q(tipo_material__es_unico=True, estado_onu=estado_disp_onu) |
-                Q(tipo_material__es_unico=False, estado_general=estado_disp_gen)
-            )
-        except (EstadoMaterialONU.DoesNotExist, EstadoMaterialGeneral.DoesNotExist):
-            materiales = Material.objects.none()
-
-        # Filtros opcionales
-        tipo_material_id = request.query_params.get('tipo_material_id')
-        almacen_id = request.query_params.get('almacen_id')
-        marca_id = request.query_params.get('marca_id')
-        modelo_id = request.query_params.get('modelo_id')
-
-        if tipo_material_id:
-            materiales = materiales.filter(tipo_material_id=tipo_material_id)
-
-        if almacen_id:
-            materiales = materiales.filter(almacen_actual_id=almacen_id)
-
-        if marca_id:
-            materiales = materiales.filter(modelo__marca_id=marca_id)
-
-        if modelo_id:
-            materiales = materiales.filter(modelo_id=modelo_id)
-
-        # Paginación
-        page = self.paginate_queryset(materiales)
-        if page is not None:
-            serializer = MaterialListSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = MaterialListSerializer(materiales, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def validar_unicidad(self, request):
-        """Validar que MAC, GPON Serial y D-SN sean únicos"""
-        mac = request.query_params.get('mac')
-        gpon_serial = request.query_params.get('gpon_serial')
-        d_sn = request.query_params.get('d_sn')
-        material_id = request.query_params.get('material_id')  # Para excluir en edición
-
-        errores = []
-
-        if mac:
-            query = Material.objects.filter(mac_address=mac.upper())
-            if material_id:
-                query = query.exclude(id=material_id)
-            if query.exists():
-                errores.append(f"MAC Address {mac} ya existe")
-
-        if gpon_serial:
-            query = Material.objects.filter(gpon_serial=gpon_serial)
-            if material_id:
-                query = query.exclude(id=material_id)
-            if query.exists():
-                errores.append(f"GPON Serial {gpon_serial} ya existe")
-
-        if d_sn:
-            query = Material.objects.filter(serial_manufacturer=d_sn)
-            if material_id:
-                query = query.exclude(id=material_id)
-            if query.exists():
-                errores.append(f"D-SN {d_sn} ya existe")
-
-        return Response({
-            'valido': len(errores) == 0,
-            'errores': errores
-        })
-
-    @action(detail=False, methods=['post'])
-    def operacion_masiva(self, request):
-        """Operaciones masivas en materiales seleccionados"""
-        materiales_ids = request.data.get('materiales_ids', [])
-        operacion = request.data.get('operacion')
-        parametros = request.data.get('parametros', {})
-
-        if not materiales_ids:
-            return Response(
-                {'error': 'Debe seleccionar al menos un material'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        materiales = Material.objects.filter(id__in=materiales_ids)
-        if not materiales.exists():
-            return Response(
-                {'error': 'No se encontraron materiales válidos'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        resultados = {'exitosos': 0, 'fallidos': 0, 'errores': []}
-
-        with transaction.atomic():
-            if operacion == 'enviar_laboratorio':
-                try:
-                    estado_lab = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
-                except EstadoMaterialONU.DoesNotExist:
-                    return Response(
-                        {'error': 'Estado de laboratorio no configurado'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-
-                for material in materiales:
-                    try:
-                        if (material.tipo_material.es_unico and
-                                material.estado_onu != estado_lab):
-                            material.enviar_a_laboratorio(usuario=request.user)
-                            resultados['exitosos'] += 1
-                        else:
-                            resultados['errores'].append(
-                                f'{material.codigo_interno}: No puede enviarse a laboratorio'
-                            )
-                            resultados['fallidos'] += 1
-                    except Exception as e:
-                        resultados['errores'].append(
-                            f'{material.codigo_interno}: {str(e)}'
-                        )
-                        resultados['fallidos'] += 1
-
-            elif operacion == 'cambiar_estado':
-                nuevo_estado_id = parametros.get('nuevo_estado_id')
-                if not nuevo_estado_id:
-                    return Response(
-                        {'error': 'Debe especificar el nuevo estado'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                for material in materiales:
-                    try:
-                        # Determinar si es estado ONU o general
-                        if material.tipo_material.es_unico:
-                            try:
-                                nuevo_estado = EstadoMaterialONU.objects.get(id=nuevo_estado_id, activo=True)
-                                estado_anterior = material.estado_onu.nombre if material.estado_onu else 'Sin estado'
-                                material.estado_onu = nuevo_estado
-                                estado_nuevo = nuevo_estado.nombre
-                            except EstadoMaterialONU.DoesNotExist:
-                                resultados['errores'].append(
-                                    f'{material.codigo_interno}: Estado inválido para equipo único'
-                                )
-                                resultados['fallidos'] += 1
-                                continue
-                        else:
-                            try:
-                                nuevo_estado = EstadoMaterialGeneral.objects.get(id=nuevo_estado_id, activo=True)
-                                estado_anterior = material.estado_general.nombre if material.estado_general else 'Sin estado'
-                                material.estado_general = nuevo_estado
-                                estado_nuevo = nuevo_estado.nombre
-                            except EstadoMaterialGeneral.DoesNotExist:
-                                resultados['errores'].append(
-                                    f'{material.codigo_interno}: Estado inválido para material general'
-                                )
-                                resultados['fallidos'] += 1
-                                continue
-
-                        material.save()
-
-                        # Crear historial
-                        HistorialMaterial.objects.create(
-                            material=material,
-                            estado_anterior=estado_anterior,
-                            estado_nuevo=estado_nuevo,
-                            almacen_anterior=material.almacen_actual,
-                            almacen_nuevo=material.almacen_actual,
-                            motivo='Operación masiva',
-                            observaciones=parametros.get('observaciones', ''),
-                            usuario_responsable=request.user
-                        )
-
-                        resultados['exitosos'] += 1
-                    except Exception as e:
-                        resultados['errores'].append(
-                            f'{material.codigo_interno}: {str(e)}'
-                        )
-                        resultados['fallidos'] += 1
-
-            else:
-                return Response(
-                    {'error': f'Operación {operacion} no válida'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        return Response({
-            'message': f'Operación masiva {operacion} completada',
-            'resultados': resultados
-        })

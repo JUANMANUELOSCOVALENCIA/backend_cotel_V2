@@ -11,6 +11,7 @@ import re
 from io import BytesIO
 from django.utils import timezone
 
+from usuarios.models import Usuario
 from .models import (
     # Modelos base
     Almacen, Proveedor,
@@ -168,12 +169,15 @@ class AlmacenSerializer(serializers.ModelSerializer):
         return value.strip().upper()
 
     def validate_codigo_cotel_encargado(self, value):
+        """Validar que el código COTEL del encargado exista"""
         if value:
             try:
-                from usuarios.models import Usuario
-                Usuario.objects.get(codigo_cotel=value)
+                # USAR 'codigocotel' en lugar de 'codigo_cotel'
+                Usuario.objects.get(codigocotel=value)
             except Usuario.DoesNotExist:
-                raise serializers.ValidationError(f"No se encontró usuario con código COTEL: {value}")
+                raise serializers.ValidationError(
+                    f"No existe un usuario con código COTEL: {value}"
+                )
         return value
 
     def validate(self, data):
@@ -1445,6 +1449,7 @@ class ImportacionMasivaSerializer(serializers.Serializer):
 
         equipos_validos = []
 
+        # ✅ VERSIÓN CORREGIDA COMPLETA
         for index, row in df.iterrows():
             fila_num = index + 2  # +2 porque pandas es 0-indexed y hay header
             errores_fila = []
@@ -1466,7 +1471,6 @@ class ImportacionMasivaSerializer(serializers.Serializer):
                 errores_fila.append("Item Equipo requerido")
 
             # Validar formato MAC
-            # Validar MAC Address
             if mac and not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', mac):
                 errores_fila.append("Formato de MAC inválido")
             else:
@@ -1508,9 +1512,9 @@ class ImportacionMasivaSerializer(serializers.Serializer):
                     'codigo_item_equipo': item_equipo
                 })
 
-            # Si solo es validación, retornar resultados
-            if validar_solo:
-                resultados['equipos_validos'] = equipos_validos
+        # Si solo es validación, retornar resultados
+        if validar_solo:
+            resultados['equipos_validos'] = equipos_validos
             return resultados
 
         # Si hay errores, no importar nada
@@ -1628,3 +1632,99 @@ class ListaOpcionesSerializer(serializers.Serializer):
                 Proveedor.objects.filter(activo=True).order_by('nombre_comercial'), many=True
             ).data
         }
+
+
+class MaterialListSerializer(serializers.ModelSerializer):
+    """Serializer para lista de materiales"""
+    modelo_info = serializers.SerializerMethodField()
+    lote_info = serializers.SerializerMethodField()
+    almacen_info = serializers.SerializerMethodField()
+    estado_display = serializers.SerializerMethodField()
+    tipo_material_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Material
+        fields = [
+            'id', 'codigo_interno', 'mac_address', 'gpon_serial',
+            'serial_manufacturer', 'codigo_item_equipo', 'cantidad',
+            'es_nuevo', 'created_at', 'updated_at',
+            'modelo_info', 'lote_info', 'almacen_info', 'estado_display',
+            'tipo_material_info'
+        ]
+
+    def get_modelo_info(self, obj):
+        return {
+            'id': obj.modelo.id,
+            'nombre': obj.modelo.nombre,
+            'codigo_modelo': obj.modelo.codigo_modelo,
+            'marca': obj.modelo.marca.nombre if obj.modelo.marca else None,
+            'tipo_equipo': obj.modelo.tipo_equipo.nombre if obj.modelo.tipo_equipo else None
+        }
+
+    def get_lote_info(self, obj):
+        return {
+            'id': obj.lote.id,
+            'numero_lote': obj.lote.numero_lote,
+            'proveedor': obj.lote.proveedor.nombre_comercial if obj.lote.proveedor else None,
+            'fecha_recepcion': obj.lote.fecha_recepcion
+        }
+
+    def get_almacen_info(self, obj):
+        return {
+            'id': obj.almacen_actual.id,
+            'codigo': obj.almacen_actual.codigo,
+            'nombre': obj.almacen_actual.nombre,
+            'ciudad': obj.almacen_actual.ciudad
+        }
+
+    def get_estado_display(self, obj):
+        if obj.tipo_material.es_unico and obj.estado_onu:
+            return {
+                'id': obj.estado_onu.id,
+                'nombre': obj.estado_onu.nombre,
+                'color': obj.estado_onu.color,
+                'permite_asignacion': obj.estado_onu.permite_asignacion
+            }
+        elif not obj.tipo_material.es_unico and obj.estado_general:
+            return {
+                'id': obj.estado_general.id,
+                'nombre': obj.estado_general.nombre,
+                'color': obj.estado_general.color,
+                'permite_consumo': obj.estado_general.permite_consumo
+            }
+        return None
+
+    def get_tipo_material_info(self, obj):
+        return {
+            'id': obj.tipo_material.id,
+            'codigo': obj.tipo_material.codigo,
+            'nombre': obj.tipo_material.nombre,
+            'es_unico': obj.tipo_material.es_unico
+        }
+
+
+class MaterialDetailSerializer(MaterialListSerializer):
+    """Serializer detallado para un material específico"""
+    historial = serializers.SerializerMethodField()
+    especificaciones_tecnicas = serializers.JSONField(read_only=True)
+
+    class Meta(MaterialListSerializer.Meta):
+        fields = MaterialListSerializer.Meta.fields + [
+            'historial', 'especificaciones_tecnicas', 'observaciones',
+            'fecha_envio_laboratorio', 'fecha_retorno_laboratorio',
+            'traspaso_actual', 'orden_trabajo'
+        ]
+
+    def get_historial(self, obj):
+        # Obtener historial reciente
+        historial = obj.historial.all()[:10]
+        return [{
+            'id': h.id,
+            'fecha_cambio': h.fecha_cambio,
+            'motivo': h.motivo,
+            'estado_anterior': h.estado_anterior,
+            'estado_nuevo': h.estado_nuevo,
+            'almacen_anterior': h.almacen_anterior.nombre if h.almacen_anterior else None,
+            'almacen_nuevo': h.almacen_nuevo.nombre if h.almacen_nuevo else None,
+            'usuario': getattr(h.usuario_responsable, 'nombre_completo', 'Usuario') if h.usuario_responsable else None
+        } for h in historial]

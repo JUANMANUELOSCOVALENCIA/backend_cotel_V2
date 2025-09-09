@@ -327,7 +327,7 @@ class Almacen(models.Model):
         if self.codigo_cotel_encargado and not self.encargado:
             try:
                 from usuarios.models import Usuario
-                self.encargado = Usuario.objects.get(codigo_cotel=self.codigo_cotel_encargado)
+                self.encargado = Usuario.objects.get(codigocotel=self.codigo_cotel_encargado)
             except Usuario.DoesNotExist:
                 pass
 

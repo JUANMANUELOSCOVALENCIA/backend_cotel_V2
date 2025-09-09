@@ -2,8 +2,7 @@
 # almacenes/views/choices_views.py
 # Views para modelos de choices y endpoint de opciones completas
 # ======================================================
-from datetime import timezone
-
+from django.utils import timezone
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -11,18 +10,20 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
+from contratos.models import TipoServicio
+from contratos.serializers import TipoServicioSerializer
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
     EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
-    RespuestaProveedor, Almacen, Proveedor, Marca, TipoEquipo
+    RespuestaProveedor, Almacen, Proveedor, Marca, TipoEquipo, Modelo, Lote  # AGREGADO Modelo
 )
 from ..serializers import (
     TipoIngresoSerializer, EstadoLoteSerializer, EstadoTraspasoSerializer,
     TipoMaterialSerializer, UnidadMedidaSerializer, EstadoMaterialONUSerializer,
     EstadoMaterialGeneralSerializer, TipoAlmacenSerializer, EstadoDevolucionSerializer,
     RespuestaProveedorSerializer, AlmacenSerializer, ProveedorSerializer,
-    MarcaSerializer, TipoEquipoSerializer, ListaOpcionesSerializer
+    MarcaSerializer, TipoEquipoSerializer, ListaOpcionesSerializer, ModeloSerializer,
 )
 
 
@@ -413,7 +414,7 @@ class OpcionesCompletasView(APIView):
     def get(self, request):
         """Obtener todas las opciones para formularios React"""
 
-        # Cache the serializer data to avoid re-serialization
+        # CORREGIDO: Inicializar cache_data
         cache_data = {}
 
         # Tipos y configuraciones básicas
@@ -478,10 +479,34 @@ class OpcionesCompletasView(APIView):
             TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
         ).data
 
+        # AGREGADO: Modelos con todas las relaciones
+        cache_data['modelos'] = ModeloSerializer(
+            Modelo.objects.filter(activo=True).select_related('marca', 'tipo_material', 'tipo_equipo',
+                                                              'unidad_medida').order_by('nombre'),
+            many=True
+        ).data
+
+        cache_data['tipos_servicio'] = TipoServicioSerializer(
+            TipoServicio.objects.all().order_by('nombre'), many=True
+        ).data
+
+        # AGREGAR LOTES DENTRO DE cache_data:
+        lotes = Lote.objects.all().select_related('proveedor', 'almacen_destino')
+        lotes_data = [{
+            'id': lote.id,
+            'numero_lote': lote.numero_lote,
+            'proveedor': lote.proveedor.nombre_comercial if lote.proveedor else None,
+            'fecha_recepcion': lote.fecha_recepcion.isoformat() if lote.fecha_recepcion else None,
+            'almacen_destino': lote.almacen_destino.nombre if lote.almacen_destino else None
+        } for lote in lotes]
+
+        # ESTA ES LA LÍNEA CLAVE:
+        cache_data['lotes'] = lotes_data
+
         # Información del usuario actual para logs
         user_info = {
             'user_id': request.user.id,
-            'username': request.user.username,
+            'username': getattr(request.user, 'codigo_cotel', 'Usuario'),
             'nombre_completo': getattr(request.user, 'nombre_completo', 'Usuario'),
             'timestamp': timezone.now().isoformat()
         }
@@ -490,15 +515,17 @@ class OpcionesCompletasView(APIView):
             'success': True,
             'message': 'Opciones completas obtenidas exitosamente',
             'user_info': user_info,
-            'data': cache_data,
+            'data': cache_data,  # Ahora incluye los lotes
             'metadata': {
                 'total_tipos_ingreso': len(cache_data['tipos_ingreso']),
                 'total_tipos_material': len(cache_data['tipos_material']),
                 'total_almacenes': len(cache_data['almacenes']),
                 'total_proveedores': len(cache_data['proveedores']),
                 'total_marcas': len(cache_data['marcas']),
+                'total_modelos': len(cache_data['modelos']),
+                'total_lotes': len(lotes_data),
                 'cache_timestamp': timezone.now().isoformat(),
-                'version': '2.0'  # Para control de versiones del API
+                'version': '2.0'
             }
         })
 

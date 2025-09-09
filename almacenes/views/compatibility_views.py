@@ -206,12 +206,12 @@ class MarcaViewSet(viewsets.ModelViewSet):
     ordering_fields = ['nombre', 'created_at']
     ordering = ['nombre']
 
+    # ✅ CORRECCIÓN
     def get_queryset(self):
-        """Filtrar marcas activas por defecto"""
         queryset = super().get_queryset()
-        incluir_inactivas = self.request.query_params.get('incluir_inactivas', 'false').lower() == 'true'
+        incluir_inactivos = self.request.query_params.get('incluir_inactivos', 'false').lower() == 'true'
 
-        if not incluir_inactivas:
+        if not incluir_inactivos:
             queryset = queryset.filter(activo=True)
 
         return queryset

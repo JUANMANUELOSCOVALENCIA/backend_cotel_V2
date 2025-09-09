@@ -13,9 +13,6 @@ from .views import (
     # Views de lotes
     LoteViewSet, LoteDetalleViewSet, ImportacionMasivaView,
 
-    # Views de materiales
-    MaterialViewSet,
-
     # Views de operaciones
     TraspasoAlmacenViewSet, DevolucionProveedorViewSet,
 
@@ -30,7 +27,7 @@ from .views import (
     EquipoONUViewSet, EquipoServicioViewSet, MarcaViewSet,
     TipoEquipoViewSet, ModeloViewSet, EstadoEquipoViewSet, ComponenteViewSet,
 
-    # AGREGAR ESTAS IMPORTACIONES - Views de choices
+    # Views de choices
     TipoIngresoViewSet,
     EstadoLoteViewSet,
     EstadoTraspasoViewSet,
@@ -42,13 +39,16 @@ from .views import (
     EstadoDevolucionViewSet,
     RespuestaProveedorViewSet,
     OpcionesCompletasView,
-    InicializarDatosView
+    InicializarDatosView,
 )
+
+# IMPORTAR MaterialViewSet SOLO UNA VEZ
+from .views.material_views import MaterialViewSet
 
 # ========== CONFIGURACIÓN DEL ROUTER ==========
 router = DefaultRouter()
 
-# ===== REGISTRAR VIEWSETS PRINCIPALES (YA EXISTENTES) =====
+# ===== REGISTRAR VIEWSETS PRINCIPALES =====
 
 # Views base
 router.register(r'almacenes', AlmacenViewSet, basename='almacenes')
@@ -58,7 +58,7 @@ router.register(r'proveedores', ProveedorViewSet, basename='proveedores')
 router.register(r'lotes', LoteViewSet, basename='lotes')
 router.register(r'lote-detalles', LoteDetalleViewSet, basename='lote-detalles')
 
-# Views de materiales
+# Views de materiales - REGISTRAR SOLO UNA VEZ
 router.register(r'materiales', MaterialViewSet, basename='materiales')
 
 # Views de operaciones
@@ -74,9 +74,7 @@ router.register(r'marcas', MarcaViewSet, basename='marcas')
 router.register(r'tipos-equipo', TipoEquipoViewSet, basename='tipos-equipo')
 router.register(r'modelos', ModeloViewSet, basename='modelos')
 router.register(r'componentes', ComponenteViewSet, basename='componentes')
-router.register(r'estados-equipo', EstadoEquipoViewSet, basename='estados-equipo')  # Legacy
-
-# ===== AGREGAR ESTOS NUEVOS REGISTROS =====
+router.register(r'estados-equipo', EstadoEquipoViewSet, basename='estados-equipo')
 
 # Views de choices/configuraciones
 router.register(r'tipos-ingreso', TipoIngresoViewSet, basename='tipos-ingreso')
@@ -116,7 +114,10 @@ urlpatterns = [
     path('reportes/garantias/', ReporteGarantiasView.as_view(), name='reporte-garantias'),
     path('reportes/eficiencia/', ReporteEficienciaView.as_view(), name='reporte-eficiencia'),
 
-    # --- AGREGAR ESTOS NUEVOS ENDPOINTS ---
+    # --- CONFIGURACIÓN Y DATOS ---
     path('opciones-completas/', OpcionesCompletasView.as_view(), name='opciones-completas'),
     path('inicializar-datos/', InicializarDatosView.as_view(), name='inicializar-datos'),
+
+    # QUITAR ESTA LÍNEA REDUNDANTE:
+    # path('materiales/', include(router.urls)),
 ]
