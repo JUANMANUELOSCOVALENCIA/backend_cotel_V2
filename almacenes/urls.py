@@ -41,6 +41,7 @@ from .views import (
     OpcionesCompletasView,
     InicializarDatosView,
 )
+from .views.compatibility_views import ModeloComponenteViewSet
 
 # IMPORTAR MaterialViewSet SOLO UNA VEZ
 from .views.material_views import MaterialViewSet
@@ -87,6 +88,8 @@ router.register(r'estados-material-general', EstadoMaterialGeneralViewSet, basen
 router.register(r'tipos-almacen', TipoAlmacenViewSet, basename='tipos-almacen')
 router.register(r'estados-devolucion', EstadoDevolucionViewSet, basename='estados-devolucion')
 router.register(r'respuestas-proveedor', RespuestaProveedorViewSet, basename='respuestas-proveedor')
+router.register(r'modelo-componentes', ModeloComponenteViewSet, basename='modelo-componentes')
+
 
 # ========== URLS PRINCIPALES ==========
 

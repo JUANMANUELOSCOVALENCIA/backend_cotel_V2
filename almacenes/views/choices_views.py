@@ -16,14 +16,14 @@ from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
     EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
-    RespuestaProveedor, Almacen, Proveedor, Marca, TipoEquipo, Modelo, Lote  # AGREGADO Modelo
+    RespuestaProveedor, Almacen, Proveedor, Marca, TipoEquipo, Modelo, Lote, Componente  # AGREGADO Modelo
 )
 from ..serializers import (
     TipoIngresoSerializer, EstadoLoteSerializer, EstadoTraspasoSerializer,
     TipoMaterialSerializer, UnidadMedidaSerializer, EstadoMaterialONUSerializer,
     EstadoMaterialGeneralSerializer, TipoAlmacenSerializer, EstadoDevolucionSerializer,
     RespuestaProveedorSerializer, AlmacenSerializer, ProveedorSerializer,
-    MarcaSerializer, TipoEquipoSerializer, ListaOpcionesSerializer, ModeloSerializer,
+    MarcaSerializer, TipoEquipoSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer,
 )
 
 
@@ -411,6 +411,28 @@ class OpcionesCompletasView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    # En choices_views.py, agregar a OpcionesCompletasView
+
+    @action(detail=False, methods=['get'])
+    def opciones_modelos(self, request):
+        """Opciones específicas para formularios de modelos"""
+        return Response({
+            'marcas': MarcaSerializer(
+                Marca.objects.filter(activo=True).order_by('nombre'), many=True
+            ).data,
+            'tipos_equipo': TipoEquipoSerializer(
+                TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
+            ).data,
+            'tipos_material': TipoMaterialSerializer(
+                TipoMaterial.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'unidades_medida': UnidadMedidaSerializer(
+                UnidadMedida.objects.filter(activo=True).order_by('orden'), many=True
+            ).data,
+            'componentes': ComponenteSerializer(
+                Componente.objects.filter(activo=True).order_by('nombre'), many=True
+            ).data
+        })
     def get(self, request):
         """Obtener todas las opciones para formularios React"""
 

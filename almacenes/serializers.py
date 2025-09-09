@@ -1728,3 +1728,93 @@ class MaterialDetailSerializer(MaterialListSerializer):
             'almacen_nuevo': h.almacen_nuevo.nombre if h.almacen_nuevo else None,
             'usuario': getattr(h.usuario_responsable, 'nombre_completo', 'Usuario') if h.usuario_responsable else None
         } for h in historial]
+
+
+# Agregar estos serializers a tu archivo existente
+
+class ComponenteCreateUpdateSerializer(serializers.ModelSerializer):
+    """Serializer para crear/actualizar componentes"""
+
+    class Meta:
+        model = Componente
+        fields = [
+            'nombre', 'descripcion', 'activo'
+        ]
+
+    def validate_nombre(self, value):
+        """Validar que el nombre sea único"""
+        instance = getattr(self, 'instance', None)
+        if Componente.objects.filter(nombre=value).exclude(
+                id=instance.id if instance else None
+        ).exists():
+            raise serializers.ValidationError(
+                f"Ya existe un componente con nombre: {value}"
+            )
+        return value
+
+
+class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
+    """Serializer para crear/actualizar modelos"""
+    componentes_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        write_only=True,
+        help_text="Lista de IDs de componentes"
+    )
+
+    class Meta:
+        model = Modelo
+        fields = [
+            'marca', 'tipo_equipo', 'tipo_material', 'unidad_medida',
+            'nombre', 'codigo_modelo', 'descripcion', 'cantidad_por_unidad',
+            'requiere_inspeccion_inicial', 'activo', 'componentes_ids'
+        ]
+
+    def validate_codigo_modelo(self, value):
+        """Validar que el código de modelo sea único"""
+        instance = getattr(self, 'instance', None)
+        if Modelo.objects.filter(codigo_modelo=value).exclude(
+                id=instance.id if instance else None
+        ).exists():
+            raise serializers.ValidationError(
+                f"Ya existe un modelo con código: {value}"
+            )
+        return value
+
+    def create(self, validated_data):
+        componentes_ids = validated_data.pop('componentes_ids', [])
+
+        with transaction.atomic():
+            modelo = Modelo.objects.create(**validated_data)
+
+            if componentes_ids:
+                for componente_id in componentes_ids:
+                    ModeloComponente.objects.create(
+                        modelo=modelo,
+                        componente_id=componente_id,
+                        cantidad=1  # Valor por defecto
+                    )
+
+        return modelo
+
+    def update(self, instance, validated_data):
+        componentes_ids = validated_data.pop('componentes_ids', None)
+
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+            if componentes_ids is not None:
+                # Eliminar relaciones existentes
+                instance.modelocomponente_set.all().delete()
+
+                # Crear nuevas relaciones
+                for componente_id in componentes_ids:
+                    ModeloComponente.objects.create(
+                        modelo=instance,
+                        componente_id=componente_id,
+                        cantidad=1
+                    )
+
+        return instance
