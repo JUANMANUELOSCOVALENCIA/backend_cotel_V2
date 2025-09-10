@@ -492,6 +492,14 @@ class LoteCreateSerializer(serializers.ModelSerializer):
             'observaciones', 'detalles'
         ]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # ✅ SOLUCIÓN: Si es actualización, detalles no es requerido
+        if self.instance is not None:  # UPDATE operation
+            self.fields['detalles'].required = False
+            self.fields['detalles'].allow_empty = True
+
     def validate_codigo_requerimiento_compra(self, value):
         if not (6 <= len(value) <= 10) or not value.isdigit():
             raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
@@ -503,6 +511,12 @@ class LoteCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
+        # ✅ AGREGAR: Validación condicional de detalles
+        # Solo validar detalles si es creación O si se proporcionan detalles
+        if self.instance is None:  # CREATE
+            if not data.get('detalles'):
+                raise serializers.ValidationError({"detalles": "Los detalles son requeridos para crear un lote"})
+
         # Validar fechas de garantía
         if data.get('fecha_fin_garantia') and data.get('fecha_inicio_garantia'):
             if data['fecha_fin_garantia'] <= data['fecha_inicio_garantia']:
@@ -534,6 +548,21 @@ class LoteCreateSerializer(serializers.ModelSerializer):
                 LoteDetalle.objects.create(lote=lote, **detalle_data)
 
         return lote
+
+    def update(self, instance, validated_data):
+        # ✅ AGREGAR: Método update para manejar actualizaciones
+        # Remover detalles de validated_data si existe (no se actualizan en edición)
+        detalles_data = validated_data.pop('detalles', None)
+
+        # Actualizar campos del lote
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Nota: Los detalles no se actualizan en la edición del lote
+        # Si se necesita modificar detalles, se hace por separado
+
+        return instance
 
     def to_representation(self, instance):
         return LoteSerializer(instance).data
@@ -1476,7 +1505,16 @@ class ListaOpcionesSerializer(serializers.Serializer):
     """Serializer para endpoints que devuelven listas de opciones para React"""
 
     def to_representation(self, instance):
+        from contratos.models import TipoServicio
         return {
+            'tipos_servicio': [
+                {
+                    'id': ts.id,
+                    'nombre': ts.nombre,
+                    'descripcion': ts.descripcion or ''
+                }
+                for ts in TipoServicio.objects.all().order_by('nombre')
+            ],
             'tipos_ingreso': TipoIngresoSerializer(
                 TipoIngreso.objects.filter(activo=True).order_by('orden'), many=True
             ).data,

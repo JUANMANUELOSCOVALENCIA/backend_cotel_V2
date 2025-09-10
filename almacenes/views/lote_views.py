@@ -620,7 +620,7 @@ class ImportacionMasivaView(APIView):
                     print(f"✅ Tipo ingreso NUEVO encontrado: {tipo_ingreso_nuevo}")
 
                     # Tipo de equipo (para compatibilidad) - AHORA modelo está disponible
-                    tipo_equipo = modelo.tipo_equipo
+                    tipo_equipo = modelo.tipo_material
                     print(f"✅ Tipo equipo del modelo: {tipo_equipo}")
 
                 except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist, TipoIngreso.DoesNotExist) as e:
@@ -640,7 +640,6 @@ class ImportacionMasivaView(APIView):
                             # Relaciones básicas
                             tipo_material=tipo_onu,
                             modelo=modelo,
-                            tipo_equipo=tipo_equipo,
                             lote=lote,
 
                             # Datos del equipo ONU
