@@ -16,14 +16,14 @@ from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
     EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
-    RespuestaProveedor, Almacen, Proveedor, Marca, TipoEquipo, Modelo, Lote, Componente  # AGREGADO Modelo
+    RespuestaProveedor, Almacen, Proveedor, Marca, Modelo, Lote, Componente  # AGREGADO Modelo
 )
 from ..serializers import (
     TipoIngresoSerializer, EstadoLoteSerializer, EstadoTraspasoSerializer,
     TipoMaterialSerializer, UnidadMedidaSerializer, EstadoMaterialONUSerializer,
     EstadoMaterialGeneralSerializer, TipoAlmacenSerializer, EstadoDevolucionSerializer,
     RespuestaProveedorSerializer, AlmacenSerializer, ProveedorSerializer,
-    MarcaSerializer, TipoEquipoSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer,
+    MarcaSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer,
 )
 
 
@@ -413,26 +413,6 @@ class OpcionesCompletasView(APIView):
 
     # En choices_views.py, agregar a OpcionesCompletasView
 
-    @action(detail=False, methods=['get'])
-    def opciones_modelos(self, request):
-        """Opciones específicas para formularios de modelos"""
-        return Response({
-            'marcas': MarcaSerializer(
-                Marca.objects.filter(activo=True).order_by('nombre'), many=True
-            ).data,
-            'tipos_equipo': TipoEquipoSerializer(
-                TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
-            ).data,
-            'tipos_material': TipoMaterialSerializer(
-                TipoMaterial.objects.filter(activo=True).order_by('orden'), many=True
-            ).data,
-            'unidades_medida': UnidadMedidaSerializer(
-                UnidadMedida.objects.filter(activo=True).order_by('orden'), many=True
-            ).data,
-            'componentes': ComponenteSerializer(
-                Componente.objects.filter(activo=True).order_by('nombre'), many=True
-            ).data
-        })
     def get(self, request):
         """Obtener todas las opciones para formularios React"""
 
@@ -497,14 +477,10 @@ class OpcionesCompletasView(APIView):
             Marca.objects.filter(activo=True).order_by('nombre'), many=True
         ).data
 
-        cache_data['tipos_equipo'] = TipoEquipoSerializer(
-            TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
-        ).data
-
         # AGREGADO: Modelos con todas las relaciones
         cache_data['modelos'] = ModeloSerializer(
-            Modelo.objects.filter(activo=True).select_related('marca', 'tipo_material', 'tipo_equipo',
-                                                              'unidad_medida').order_by('nombre'),
+            Modelo.objects.filter(activo=True).select_related('marca', 'tipo_material', 'unidad_medida').order_by(
+                'nombre'),
             many=True
         ).data
 

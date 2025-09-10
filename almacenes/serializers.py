@@ -22,7 +22,7 @@ from .models import (
     RespuestaProveedor,
 
     # Modelos existentes actualizados
-    Marca, TipoEquipo, Componente, EstadoEquipo, Modelo, ModeloComponente,
+    Marca, Componente, Modelo, ModeloComponente,
 
     # Modelos de lotes
     Lote, LoteDetalle, EntregaParcialLote,
@@ -34,9 +34,6 @@ from .models import (
     TraspasoAlmacen, TraspasoMaterial,
     DevolucionProveedor, DevolucionMaterial,
     HistorialMaterial,
-
-    # Modelos para compatibilidad
-    EquipoONU, EquipoServicio
 )
 
 
@@ -226,24 +223,6 @@ class MarcaSerializer(serializers.ModelSerializer):
     def get_materiales_count(self, obj):
         return sum(modelo.material_set.count() for modelo in obj.modelo_set.filter(activo=True))
 
-
-class TipoEquipoSerializer(serializers.ModelSerializer):
-    modelos_count = serializers.SerializerMethodField()
-    materiales_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = TipoEquipo
-        fields = ['id', 'nombre', 'descripcion', 'activo', 'modelos_count', 'materiales_count', 'created_at',
-                  'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def get_modelos_count(self, obj):
-        return obj.modelo_set.filter(activo=True).count()
-
-    def get_materiales_count(self, obj):
-        return obj.material_set.count()
-
-
 class ComponenteSerializer(serializers.ModelSerializer):
     modelos_usando = serializers.SerializerMethodField()
 
@@ -254,20 +233,6 @@ class ComponenteSerializer(serializers.ModelSerializer):
 
     def get_modelos_usando(self, obj):
         return obj.modelocomponente_set.filter(modelo__activo=True).count()
-
-
-class EstadoEquipoSerializer(serializers.ModelSerializer):
-    """Serializer para compatibilidad con el modelo EstadoEquipo legacy"""
-    equipos_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = EstadoEquipo
-        fields = ['id', 'nombre', 'descripcion', 'activo', 'equipos_count', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def get_equipos_count(self, obj):
-        return obj.equipoonu_set.count()
-
 
 class ModeloComponenteSerializer(serializers.ModelSerializer):
     componente_info = serializers.SerializerMethodField()
@@ -281,10 +246,10 @@ class ModeloComponenteSerializer(serializers.ModelSerializer):
             'id': obj.componente.id,
             'nombre': obj.componente.nombre
         }
+
 class ModeloSerializer(serializers.ModelSerializer):
     # Información completa de relaciones ForeignKey
     marca_info = serializers.SerializerMethodField()
-    tipo_equipo_info = serializers.SerializerMethodField()
     tipo_material_info = serializers.SerializerMethodField()
     unidad_medida_info = serializers.SerializerMethodField()
 
@@ -305,7 +270,7 @@ class ModeloSerializer(serializers.ModelSerializer):
     class Meta:
         model = Modelo
         fields = [
-            'id', 'marca', 'marca_info', 'tipo_equipo', 'tipo_equipo_info',
+            'id', 'marca', 'marca_info',
             'nombre', 'codigo_modelo', 'descripcion', 'activo',
             'tipo_material', 'tipo_material_info', 'unidad_medida', 'unidad_medida_info',
             'cantidad_por_unidad', 'requiere_inspeccion_inicial',
@@ -318,12 +283,6 @@ class ModeloSerializer(serializers.ModelSerializer):
         return {
             'id': obj.marca.id,
             'nombre': obj.marca.nombre
-        }
-
-    def get_tipo_equipo_info(self, obj):
-        return {
-            'id': obj.tipo_equipo.id,
-            'nombre': obj.tipo_equipo.nombre
         }
 
     def get_tipo_material_info(self, obj):
@@ -1151,76 +1110,6 @@ class HistorialMaterialSerializer(serializers.ModelSerializer):
             }
         return None
 
-
-# ========== SERIALIZERS PARA COMPATIBILIDAD ==========
-
-class EquipoONUSerializer(serializers.ModelSerializer):
-    """Serializer de compatibilidad para el modelo existente"""
-    modelo_info = serializers.SerializerMethodField()
-    tipo_equipo_info = serializers.SerializerMethodField()
-    estado_info = serializers.SerializerMethodField()
-    lote_info = serializers.SerializerMethodField()
-
-    class Meta:
-        model = EquipoONU
-        fields = [
-            'id', 'codigo_interno', 'modelo', 'modelo_info',
-            'tipo_equipo', 'tipo_equipo_info', 'lote', 'lote_info',
-            'mac_address', 'gpon_serial', 'serial_manufacturer',
-            'fecha_ingreso', 'estado', 'estado_info',
-            'observaciones', 'created_at', 'updated_at'
-        ]
-        read_only_fields = ['fecha_ingreso', 'created_at', 'updated_at']
-
-    def get_modelo_info(self, obj):
-        return {
-            'nombre': obj.modelo.nombre,
-            'marca': obj.modelo.marca.nombre
-        }
-
-    def get_tipo_equipo_info(self, obj):
-        return {
-            'nombre': obj.tipo_equipo.nombre
-        }
-
-    def get_estado_info(self, obj):
-        if obj.estado:
-            return {
-                'nombre': obj.estado.nombre
-            }
-        return None
-
-    def get_lote_info(self, obj):
-        return {
-            'numero_lote': obj.lote.numero_lote
-        }
-
-
-class EquipoServicioSerializer(serializers.ModelSerializer):
-    """Serializer de compatibilidad para relaciones con contratos"""
-    equipo_info = serializers.SerializerMethodField()
-    contrato_info = serializers.SerializerMethodField()
-
-    class Meta:
-        model = EquipoServicio
-        fields = [
-            'id', 'equipo_onu', 'equipo_info', 'contrato', 'contrato_info',
-            'servicio', 'fecha_asignacion', 'fecha_desasignacion',
-            'estado_asignacion', 'observaciones', 'created_at', 'updated_at'
-        ]
-        read_only_fields = ['fecha_asignacion', 'created_at', 'updated_at']
-
-    def get_equipo_info(self, obj):
-        return {
-            'codigo_interno': obj.equipo_onu.codigo_interno
-        }
-
-    def get_contrato_info(self, obj):
-        return {
-            'numero_contrato': obj.contrato.numero_contrato
-        }
-
-
 # ========== SERIALIZERS DE OPERACIONES ESPECIALES ==========
 
 class LaboratorioOperacionSerializer(serializers.Serializer):
@@ -1536,7 +1425,6 @@ class ImportacionMasivaSerializer(serializers.Serializer):
                     material = Material.objects.create(
                         tipo_material=tipo_onu,
                         modelo=modelo,
-                        tipo_equipo=modelo.tipo_equipo,
                         lote=lote,
                         mac_address=equipo_data['mac_address'],
                         gpon_serial=equipo_data['gpon_serial'],
@@ -1622,9 +1510,6 @@ class ListaOpcionesSerializer(serializers.Serializer):
             'marcas': MarcaSerializer(
                 Marca.objects.filter(activo=True).order_by('nombre'), many=True
             ).data,
-            'tipos_equipo': TipoEquipoSerializer(
-                TipoEquipo.objects.filter(activo=True).order_by('nombre'), many=True
-            ).data,
             'almacenes': AlmacenSerializer(
                 Almacen.objects.filter(activo=True).order_by('codigo'), many=True
             ).data,
@@ -1658,7 +1543,6 @@ class MaterialListSerializer(serializers.ModelSerializer):
             'nombre': obj.modelo.nombre,
             'codigo_modelo': obj.modelo.codigo_modelo,
             'marca': obj.modelo.marca.nombre if obj.modelo.marca else None,
-            'tipo_equipo': obj.modelo.tipo_equipo.nombre if obj.modelo.tipo_equipo else None
         }
 
     def get_lote_info(self, obj):
@@ -1765,7 +1649,7 @@ class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Modelo
         fields = [
-            'marca', 'tipo_equipo', 'tipo_material', 'unidad_medida',
+            'marca', 'tipo_material', 'unidad_medida',
             'nombre', 'codigo_modelo', 'descripcion', 'cantidad_por_unidad',
             'requiere_inspeccion_inicial', 'activo', 'componentes_ids'
         ]

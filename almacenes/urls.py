@@ -24,8 +24,7 @@ from .views import (
     ReporteMovimientosView, ReporteGarantiasView, ReporteEficienciaView,
 
     # Views de compatibilidad
-    EquipoONUViewSet, EquipoServicioViewSet, MarcaViewSet,
-    TipoEquipoViewSet, ModeloViewSet, EstadoEquipoViewSet, ComponenteViewSet,
+    MarcaViewSet, ModeloViewSet, ComponenteViewSet,
 
     # Views de choices
     TipoIngresoViewSet,
@@ -66,16 +65,10 @@ router.register(r'materiales', MaterialViewSet, basename='materiales')
 router.register(r'traspasos', TraspasoAlmacenViewSet, basename='traspasos')
 router.register(r'devoluciones', DevolucionProveedorViewSet, basename='devoluciones')
 
-# Views de compatibilidad (sistema legacy)
-router.register(r'equipos-onu', EquipoONUViewSet, basename='equipos-onu')
-router.register(r'equipo-servicios', EquipoServicioViewSet, basename='equipo-servicios')
-
 # Views de modelos básicos actualizados
 router.register(r'marcas', MarcaViewSet, basename='marcas')
-router.register(r'tipos-equipo', TipoEquipoViewSet, basename='tipos-equipo')
 router.register(r'modelos', ModeloViewSet, basename='modelos')
 router.register(r'componentes', ComponenteViewSet, basename='componentes')
-router.register(r'estados-equipo', EstadoEquipoViewSet, basename='estados-equipo')
 
 # Views de choices/configuraciones
 router.register(r'tipos-ingreso', TipoIngresoViewSet, basename='tipos-ingreso')

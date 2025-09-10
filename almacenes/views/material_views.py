@@ -59,7 +59,7 @@ class MaterialFilter(django_filters.FilterSet):
 class MaterialViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de materiales (ONUs y otros)"""
     queryset = Material.objects.select_related(
-        'modelo__marca', 'modelo__tipo_equipo', 'lote', 'almacen_actual',
+        'modelo__marca', 'modelo__tipo_material', 'modelo__unidad_medida', 'lote', 'almacen_actual',
         'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen'
     ).order_by('-created_at')
 

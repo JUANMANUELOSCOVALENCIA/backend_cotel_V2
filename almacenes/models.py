@@ -412,21 +412,6 @@ class Marca(models.Model):
     class Meta:
         db_table = 'almacenes_marca'
 
-
-class TipoEquipo(models.Model):
-    nombre = models.CharField(max_length=50, unique=True)
-    descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.nombre
-
-    class Meta:
-        db_table = 'almacenes_tipo_equipo'
-
-
 class Componente(models.Model):
     nombre = models.CharField(max_length=100, unique=True)
     descripcion = models.TextField(blank=True)
@@ -440,25 +425,8 @@ class Componente(models.Model):
     class Meta:
         db_table = 'almacenes_componente'
 
-
-class EstadoEquipo(models.Model):
-    """Para compatibilidad - los nuevos estados están en EstadoMaterialONU"""
-    nombre = models.CharField(max_length=50, unique=True)
-    descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.nombre
-
-    class Meta:
-        db_table = 'almacenes_estado_equipo'
-
-
 class Modelo(models.Model):
     marca = models.ForeignKey(Marca, on_delete=models.CASCADE)
-    tipo_equipo = models.ForeignKey(TipoEquipo, on_delete=models.CASCADE)
     nombre = models.CharField(max_length=100)
     codigo_modelo = models.IntegerField(unique=True)
     descripcion = models.TextField(blank=True)
@@ -683,7 +651,6 @@ class Material(models.Model):
 
     # Relaciones básicas
     modelo = models.ForeignKey(Modelo, on_delete=models.CASCADE)
-    tipo_equipo = models.ForeignKey(TipoEquipo, on_delete=models.CASCADE)  # Para compatibilidad
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, help_text="Lote de origen")
 
     # Campos específicos para equipos únicos
@@ -905,6 +872,11 @@ class Material(models.Model):
                     pass
 
         self.save()
+
+    @property
+    def tipo_equipo(self):
+        """Obtener tipo de equipo desde el modelo"""
+        return self.modelo.tipo_equipo if self.modelo else None
 
 
 # ========== MODELO DE TRASPASOS ==========
@@ -1178,51 +1150,6 @@ class HistorialMaterial(models.Model):
 
     def __str__(self):
         return f"{self.material.codigo_interno} - {self.motivo} ({self.fecha_cambio})"
-
-
-# ========== MODELO PARA COMPATIBILIDAD CON EQUIPOONU EXISTENTE ==========
-
-class EquipoONU(models.Model):
-    """Modelo existente - mantener para compatibilidad"""
-    codigo_interno = models.CharField(max_length=50, unique=True)
-    modelo = models.ForeignKey(Modelo, on_delete=models.CASCADE)
-    tipo_equipo = models.ForeignKey(TipoEquipo, on_delete=models.CASCADE)
-    lote = models.ForeignKey(Lote, on_delete=models.CASCADE)
-    mac_address = models.CharField(max_length=17, unique=True)
-    gpon_serial = models.CharField(max_length=100, unique=True)
-    serial_manufacturer = models.CharField(max_length=100, unique=True)
-    fecha_ingreso = models.DateField(auto_now_add=True)
-    estado = models.ForeignKey(EstadoEquipo, on_delete=models.SET_NULL, null=True, blank=True)
-    observaciones = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"{self.codigo_interno} - {self.modelo}"
-
-    class Meta:
-        db_table = 'almacenes_equipo_onu'
-
-
-class EquipoServicio(models.Model):
-    """Relación entre equipos y contratos/servicios - mantener para compatibilidad"""
-    equipo_onu = models.ForeignKey(EquipoONU, on_delete=models.CASCADE)
-    contrato = models.ForeignKey('contratos.Contrato', on_delete=models.CASCADE)
-    servicio = models.ForeignKey('contratos.Servicio', on_delete=models.CASCADE)
-    fecha_asignacion = models.DateField(auto_now_add=True)
-    fecha_desasignacion = models.DateField(null=True, blank=True)
-    estado_asignacion = models.CharField(max_length=20, default='ACTIVO', choices=[
-        ('ACTIVO', 'Activo'),
-        ('SUSPENDIDO', 'Suspendido'),
-        ('CANCELADO', 'Cancelado'),
-    ])
-    observaciones = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'almacenes_equipo_servicio'
-
 
 # ========== FUNCIÓN PARA CREAR DATOS INICIALES ==========
 

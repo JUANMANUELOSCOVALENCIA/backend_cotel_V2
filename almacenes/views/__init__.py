@@ -46,12 +46,8 @@ from .reporte_views import (
 
 # Views de compatibilidad
 from .compatibility_views import (
-    EquipoONUViewSet,
-    EquipoServicioViewSet,
     MarcaViewSet,
-    TipoEquipoViewSet,
     ModeloViewSet,
-    EstadoEquipoViewSet,
     ComponenteViewSet
 )
 
@@ -103,12 +99,8 @@ __all__ = [
     'ReporteEficienciaView',
 
     # Views de compatibilidad
-    'EquipoONUViewSet',
-    'EquipoServicioViewSet',
     'MarcaViewSet',
-    'TipoEquipoViewSet',
     'ModeloViewSet',
-    'EstadoEquipoViewSet',
     'ComponenteViewSet',
 
     # AGREGAR ESTAS EXPORTACIONES - Views para modelos de choices
