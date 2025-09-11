@@ -35,7 +35,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
     queryset = Proveedor.objects.all()
     serializer_class = ProveedorSerializer
     permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'proveedores'
+    basename = 'almacenes'
 
     filter_backends = [filters.SearchFilter]
     search_fields = ['codigo', 'nombre_comercial']
