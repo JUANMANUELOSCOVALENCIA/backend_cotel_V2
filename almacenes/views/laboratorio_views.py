@@ -6,6 +6,7 @@
 from datetime import datetime, timedelta
 from django.db.models import Count, Q
 from django.db import transaction
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -16,7 +17,7 @@ from usuarios.permissions import GenericRolePermission
 from ..models import (
     Material, Lote,
     # Modelos de choices (antes TextChoices)
-    TipoMaterial, EstadoMaterialONU, TipoIngreso, EstadoLote, HistorialMaterial
+    TipoMaterial, EstadoMaterialONU, TipoIngreso, EstadoLote, HistorialMaterial, InspeccionLaboratorio
 )
 from ..serializers import (
     LaboratorioOperacionSerializer, MaterialListSerializer
@@ -484,4 +485,127 @@ class LaboratorioConsultaView(APIView):
                 'tiempo_promedio_dias': round(tiempo_promedio, 1)
             },
             'historial': historial_data
+        })
+
+
+# En almacenes/views/laboratorio_views.py
+
+class InspeccionLaboratorioView(APIView):
+    """View para inspecciones detalladas de laboratorio"""
+    permission_classes = [IsAuthenticated, GenericRolePermission]
+
+    def post(self, request):
+        """Registrar inspección detallada"""
+        data = request.data
+
+        try:
+            material = Material.objects.get(id=data['material_id'])
+
+            # Crear registro de inspección
+            inspeccion = InspeccionLaboratorio.objects.create(
+                material=material,
+                numero_informe=data['numero_informe'],
+                serie_logica_ok=data.get('serie_logica_ok', True),
+                wifi_24_ok=data.get('wifi_24_ok', True),
+                wifi_5_ok=data.get('wifi_5_ok', True),
+                puerto_ethernet_ok=data.get('puerto_ethernet_ok', True),
+                puerto_lan_ok=data.get('puerto_lan_ok', True),
+                aprobado=data['aprobado'],
+                observaciones_tecnico=data.get('observaciones_tecnico', ''),
+                comentarios_adicionales=data.get('comentarios_adicionales', ''),
+                fallas_detectadas=data.get('fallas_detectadas', []),
+                tecnico_revisor=data.get('tecnico_revisor', ''),
+                tiempo_inspeccion_minutos=data.get('tiempo_inspeccion_minutos', 0),
+                usuario_responsable=request.user
+            )
+
+            # Actualizar material
+            material.numero_informe_laboratorio = inspeccion.numero_informe
+            material.observaciones_laboratorio = {
+                'ultima_inspeccion': inspeccion.id,
+                'fallas_detectadas': data.get('fallas_detectadas', []),
+                'observaciones': data.get('observaciones_tecnico', ''),
+                'fecha_inspeccion': inspeccion.fecha_inspeccion.isoformat()
+            }
+
+            # Cambiar estado según resultado
+            if data['aprobado']:
+                estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+                material.estado_onu = estado_disponible
+            else:
+                estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+                material.estado_onu = estado_defectuoso
+
+            material.fecha_retorno_laboratorio = timezone.now()
+            material.save()
+
+            # Crear historial
+            HistorialMaterial.objects.create(
+                material=material,
+                estado_anterior='En Laboratorio',
+                estado_nuevo=material.estado_display,
+                almacen_anterior=material.almacen_actual,
+                almacen_nuevo=material.almacen_actual,
+                motivo=f'Inspección laboratorio: {inspeccion.numero_informe}',
+                observaciones=f"Resultado: {'APROBADO' if data['aprobado'] else 'RECHAZADO'}. {data.get('observaciones_tecnico', '')}",
+                usuario_responsable=request.user
+            )
+
+            return Response({
+                'success': True,
+                'message': f'Inspección registrada: {inspeccion.numero_informe}',
+                'inspeccion_id': inspeccion.id,
+                'material_estado': material.estado_display
+            })
+
+        except Material.DoesNotExist:
+            return Response({'error': 'Material no encontrado'}, status=404)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    def get(self, request):
+        """Obtener inspecciones de laboratorio"""
+        material_id = request.query_params.get('material_id')
+
+        if material_id:
+            inspecciones = InspeccionLaboratorio.objects.filter(
+                material_id=material_id
+            ).order_by('-fecha_inspeccion')
+        else:
+            # Últimas inspecciones
+            days = int(request.query_params.get('days', 7))
+            fecha_desde = timezone.now() - timedelta(days=days)
+            inspecciones = InspeccionLaboratorio.objects.filter(
+                fecha_inspeccion__gte=fecha_desde
+            ).order_by('-fecha_inspeccion')
+
+        data = []
+        for insp in inspecciones:
+            data.append({
+                'id': insp.id,
+                'numero_informe': insp.numero_informe,
+                'material': {
+                    'id': insp.material.id,
+                    'codigo_interno': insp.material.codigo_interno,
+                    'mac_address': insp.material.mac_address
+                },
+                'resultados': {
+                    'serie_logica_ok': insp.serie_logica_ok,
+                    'wifi_24_ok': insp.wifi_24_ok,
+                    'wifi_5_ok': insp.wifi_5_ok,
+                    'puerto_ethernet_ok': insp.puerto_ethernet_ok,
+                    'puerto_lan_ok': insp.puerto_lan_ok,
+                    'aprobado': insp.aprobado
+                },
+                'observaciones_tecnico': insp.observaciones_tecnico,
+                'comentarios_adicionales': insp.comentarios_adicionales,
+                'fallas_detectadas': insp.fallas_detectadas,
+                'tecnico_revisor': insp.tecnico_revisor,
+                'tiempo_inspeccion_minutos': insp.tiempo_inspeccion_minutos,
+                'fecha_inspeccion': insp.fecha_inspeccion
+            })
+
+        return Response({
+            'inspecciones': data,
+            'total': len(data)
         })

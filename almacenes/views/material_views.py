@@ -1,14 +1,20 @@
+from datetime import timedelta
+
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import rest_framework as django_filters
+from rest_framework.views import APIView
 
 from usuarios.permissions import GenericRolePermission
 from .. import models
-from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, Modelo
+from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, Modelo, InspeccionLaboratorio, \
+    HistorialMaterial, TipoIngreso
 from ..serializers import MaterialListSerializer, MaterialDetailSerializer
 
 
@@ -219,3 +225,89 @@ class MaterialViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+# En almacenes/views/material_views.py
+
+class ReingresoMaterialView(APIView):
+    """View para manejar reingresos de materiales"""
+    permission_classes = [IsAuthenticated, GenericRolePermission]
+
+    def post(self, request):
+        """Crear reingreso de material defectuoso"""
+        data = request.data
+
+        try:
+            # Material original defectuoso
+            material_original = Material.objects.get(id=data['material_original_id'])
+
+            # Validar que esté defectuoso
+            if not material_original.estado_onu or material_original.estado_onu.codigo != 'DEFECTUOSO':
+                return Response({
+                    'error': 'Solo se pueden reingresar materiales defectuosos'
+                }, status=400)
+
+            with transaction.atomic():
+                # Crear nuevo material de reingreso
+                nuevo_material = Material.objects.create(
+                    tipo_material=material_original.tipo_material,
+                    modelo=material_original.modelo,
+                    lote=material_original.lote,
+
+                    # Datos del nuevo equipo
+                    mac_address=data['mac_address'],
+                    gpon_serial=data['gpon_serial'],
+                    serial_manufacturer=data['serial_manufacturer'],
+                    codigo_item_equipo=data['codigo_item_equipo'],
+
+                    almacen_actual=material_original.almacen_actual,
+                    es_nuevo=False,  # Es reingreso
+                    tipo_origen=TipoIngreso.objects.get(codigo='REINGRESO'),
+                    cantidad=1.00,
+
+                    # Referencias al original
+                    equipo_original=material_original,
+                    motivo_reingreso=data.get('motivo_reingreso', 'Reposición por equipo defectuoso'),
+                    numero_entrega_parcial=material_original.numero_entrega_parcial,
+
+                    observaciones=f"Reingreso del equipo {material_original.codigo_interno}"
+                )
+
+                # Actualizar material original
+                material_original.observaciones += f"\nREEMPLAZADO POR: {nuevo_material.codigo_interno} - {timezone.now()}"
+                material_original.save()
+
+                # Crear historial para ambos
+                HistorialMaterial.objects.create(
+                    material=material_original,
+                    estado_anterior=material_original.estado_display,
+                    estado_nuevo='Reemplazado',
+                    almacen_anterior=material_original.almacen_actual,
+                    almacen_nuevo=material_original.almacen_actual,
+                    motivo='Equipo reemplazado por reingreso',
+                    observaciones=f'Reemplazado por {nuevo_material.codigo_interno}',
+                    usuario_responsable=request.user
+                )
+
+                HistorialMaterial.objects.create(
+                    material=nuevo_material,
+                    estado_anterior='',
+                    estado_nuevo=nuevo_material.estado_display,
+                    almacen_anterior=None,
+                    almacen_nuevo=nuevo_material.almacen_actual,
+                    motivo='Reingreso por reposición',
+                    observaciones=f'Reemplaza equipo defectuoso {material_original.codigo_interno}',
+                    usuario_responsable=request.user
+                )
+
+            return Response({
+                'success': True,
+                'message': 'Reingreso registrado exitosamente',
+                'material_original': material_original.codigo_interno,
+                'material_nuevo': nuevo_material.codigo_interno
+            })
+
+        except Material.DoesNotExist:
+            return Response({'error': 'Material original no encontrado'}, status=404)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)

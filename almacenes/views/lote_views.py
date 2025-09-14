@@ -6,6 +6,7 @@ import pandas as pd
 import re
 from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -377,6 +378,8 @@ class LoteViewSet(viewsets.ModelViewSet):
         })
 
 
+# En almacenes/views/lote_views.py
+
 class ImportacionMasivaView(APIView):
     """View para importación masiva de materiales desde Excel/CSV"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
@@ -392,16 +395,17 @@ class ImportacionMasivaView(APIView):
             modelo_id = request.data.get('modelo_id')
             item_equipo = request.data.get('item_equipo')
             archivo = request.FILES.get('archivo')
+            numero_entrega = request.data.get('numero_entrega')  # ✅ NUEVO PARÁMETRO
             es_validacion = request.data.get('validacion', 'false').lower() == 'true'
 
-            # DEBUGGING INMEDIATO - AGREGAR AQUÍ:
+            # DEBUGGING INMEDIATO
             print(f"🔍 DEBUG PARAMETROS RECIBIDOS:")
             print(f"   lote_id: '{lote_id}' (tipo: {type(lote_id)})")
             print(f"   modelo_id: '{modelo_id}' (tipo: {type(modelo_id)})")
             print(f"   item_equipo: '{item_equipo}' (tipo: {type(item_equipo)})")
+            print(f"   numero_entrega: '{numero_entrega}' (tipo: {type(numero_entrega)})")
             print(f"   archivo: {archivo.name if archivo else 'None'}")
             print(f"   es_validacion: {es_validacion}")
-            print(f"   request.data completo: {dict(request.data)}")
 
             # Validar parámetros requeridos
             if not all([lote_id, modelo_id, item_equipo, archivo]):
@@ -422,7 +426,6 @@ class ImportacionMasivaView(APIView):
             # Validar formato ITEM_EQUIPO
             if not re.match(r'^\d{6,10}$', item_equipo_str):
                 print(f"❌ ITEM_EQUIPO regex failed para: '{item_equipo_str}'")
-                print(f"   Cada caracter: {[f'{i}:{c}({ord(c)})' for i, c in enumerate(item_equipo_str)]}")
                 return Response({
                     'success': False,
                     'error': f'ITEM_EQUIPO debe tener entre 6 y 10 dígitos numéricos. Recibido: "{item_equipo_str}"'
@@ -443,15 +446,13 @@ class ImportacionMasivaView(APIView):
                     'error': 'Lote o modelo no encontrado'
                 }, status=status.HTTP_404_NOT_FOUND)
 
-            # Verificar que el modelo Material exista y sea accesible
+            # Verificar modelo Material
             print("🔍 Verificando modelo Material...")
             try:
-                # Contar materiales existentes
                 total_materiales_antes = Material.objects.count()
                 materiales_lote_antes = Material.objects.filter(lote_id=lote_id).count()
                 print(f"📊 Materiales en sistema: {total_materiales_antes}")
                 print(f"📊 Materiales en lote {lote_id}: {materiales_lote_antes}")
-
             except Exception as e:
                 print(f"❌ Error accediendo a Material: {e}")
                 return Response({
@@ -472,7 +473,7 @@ class ImportacionMasivaView(APIView):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 print(f"✅ Archivo leído: {len(df)} filas")
-                print(f"📝 Columnas: {list(df.columns)}")
+                print(f"📝 Columnas disponibles: {list(df.columns)}")
 
             except Exception as e:
                 print(f"💥 Error leyendo archivo: {str(e)}")
@@ -481,15 +482,19 @@ class ImportacionMasivaView(APIView):
                     'error': f'Error al leer archivo: {str(e)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # Validar columnas requeridas
-            columnas_requeridas = ['D_SN', 'GPON_SN', 'MAC']
+            # ✅ VALIDAR COLUMNAS - D_SN AHORA OPCIONAL
+            columnas_requeridas = ['GPON_SN', 'MAC']
+            columnas_opcionales = ['D_SN']
+
             columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
 
             if columnas_faltantes:
                 return Response({
                     'success': False,
-                    'error': f'Columnas faltantes en el archivo: {", ".join(columnas_faltantes)}. Columnas requeridas: {", ".join(columnas_requeridas)}'
+                    'error': f'Columnas faltantes: {", ".join(columnas_faltantes)}. Requeridas: {", ".join(columnas_requeridas)}. Opcionales: {", ".join(columnas_opcionales)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
+
+            print(f"✅ Columnas validadas. D_SN es opcional: {'D_SN' in df.columns}")
 
             # Validar tamaño del archivo
             if len(df) > 1000:
@@ -498,7 +503,7 @@ class ImportacionMasivaView(APIView):
                     'error': 'El archivo no puede tener más de 1000 filas'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # Procesar datos
+            # ✅ PROCESAR DATOS CON SN OPCIONAL
             equipos_validos = []
             errores = []
             macs_duplicados = set()
@@ -506,64 +511,92 @@ class ImportacionMasivaView(APIView):
             dsn_duplicados = set()
 
             for index, row in df.iterrows():
-                # Crear datos del equipo con ITEM_EQUIPO fijo
-                equipo_data = {
-                    'serial_manufacturer': str(row['D_SN']).strip(),
-                    'gpon_serial': str(row['GPON_SN']).strip(),
-                    'mac_address': str(row['MAC']).strip().upper(),
-                    'codigo_item_equipo': str(item_equipo).strip(),
-                    'fila': index + 2  # +2 porque pandas inicia en 0 y hay header
-                }
-
-                # Validaciones por fila
+                fila_num = index + 2  # +2 porque pandas inicia en 0 y hay header
                 errores_fila = []
 
-                # Validar D_SN
-                if not equipo_data['serial_manufacturer'] or len(equipo_data['serial_manufacturer']) < 6:
-                    errores_fila.append('D_SN debe tener al menos 6 caracteres')
-                elif equipo_data['serial_manufacturer'] in dsn_duplicados:
-                    errores_fila.append('D_SN duplicado en el archivo')
-                else:
-                    dsn_duplicados.add(equipo_data['serial_manufacturer'])
+                # ✅ EXTRAER DATOS - D_SN OPCIONAL
+                mac = str(row['MAC']).strip().upper() if pd.notna(row['MAC']) else ''
+                gpon_sn = str(row['GPON_SN']).strip() if pd.notna(row['GPON_SN']) else ''
 
-                # Validar GPON_SN
-                if not equipo_data['gpon_serial'] or len(equipo_data['gpon_serial']) < 8:
-                    errores_fila.append('GPON_SN debe tener al menos 8 caracteres')
-                elif equipo_data['gpon_serial'] in gpon_duplicados:
-                    errores_fila.append('GPON_SN duplicado en el archivo')
-                else:
-                    gpon_duplicados.add(equipo_data['gpon_serial'])
+                # D_SN opcional - puede no existir la columna o estar vacío
+                d_sn = ''
+                if 'D_SN' in df.columns and 'D_SN' in row and pd.notna(row['D_SN']):
+                    d_sn = str(row['D_SN']).strip()
 
-                # Validar MAC Address
-                mac_pattern = r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$'
-                if not equipo_data['mac_address']:
-                    errores_fila.append('MAC address es requerida')
-                elif not re.match(mac_pattern, equipo_data['mac_address']):
-                    errores_fila.append('Formato de MAC inválido. Use XX:XX:XX:XX:XX:XX')
-                elif equipo_data['mac_address'] in macs_duplicados:
-                    errores_fila.append('MAC duplicada en el archivo')
-                else:
-                    macs_duplicados.add(equipo_data['mac_address'])
+                # Crear datos del equipo
+                equipo_data = {
+                    'mac_address': mac,
+                    'gpon_serial': gpon_sn,
+                    'serial_manufacturer': d_sn,  # ✅ Puede estar vacío
+                    'codigo_item_equipo': item_equipo,
+                    'fila': fila_num
+                }
 
-                # Verificar duplicados en base de datos (solo si no es validación)
+                # ✅ VALIDACIONES CON FORMATOS MANTENIDOS
+
+                # MAC Address - OBLIGATORIO con formato
+                if not mac:
+                    errores_fila.append('MAC Address es requerido')
+                else:
+                    # Validar formato MAC
+                    mac_pattern = r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$'
+                    if not re.match(mac_pattern, mac):
+                        errores_fila.append('Formato de MAC inválido. Use XX:XX:XX:XX:XX:XX')
+                    else:
+                        # Normalizar MAC
+                        mac = mac.replace('-', ':')
+                        equipo_data['mac_address'] = mac
+
+                        # Verificar duplicados en archivo
+                        if mac in macs_duplicados:
+                            errores_fila.append('MAC duplicada en el archivo')
+                        else:
+                            macs_duplicados.add(mac)
+
+                # GPON Serial - OBLIGATORIO con formato
+                if not gpon_sn:
+                    errores_fila.append('GPON Serial es requerido')
+                elif len(gpon_sn) < 8:
+                    errores_fila.append('GPON Serial debe tener al menos 8 caracteres')
+                else:
+                    # Verificar duplicados en archivo
+                    if gpon_sn in gpon_duplicados:
+                        errores_fila.append('GPON Serial duplicado en el archivo')
+                    else:
+                        gpon_duplicados.add(gpon_sn)
+
+                # ✅ D_SN - OPCIONAL con formato si se proporciona
+                if d_sn:  # Solo validar si tiene valor
+                    if len(d_sn) < 6:
+                        errores_fila.append('D-SN debe tener al menos 6 caracteres si se proporciona')
+                    else:
+                        # Verificar duplicados en archivo
+                        if d_sn in dsn_duplicados:
+                            errores_fila.append('D-SN duplicado en el archivo')
+                        else:
+                            dsn_duplicados.add(d_sn)
+
+                # ✅ VERIFICAR DUPLICADOS EN BASE DE DATOS (solo si no es validación)
                 if not errores_fila and not es_validacion:
-                    # Verificar MAC existente
-                    if Material.objects.filter(mac_address=equipo_data['mac_address']).exists():
+                    # MAC siempre verificar (obligatorio)
+                    if Material.objects.filter(mac_address=mac).exists():
                         errores_fila.append('MAC ya existe en el sistema')
 
-                    # Verificar GPON Serial existente
-                    if Material.objects.filter(gpon_serial=equipo_data['gpon_serial']).exists():
-                        errores_fila.append('GPON_SN ya existe en el sistema')
+                    # GPON siempre verificar (obligatorio)
+                    if Material.objects.filter(gpon_serial=gpon_sn).exists():
+                        errores_fila.append('GPON Serial ya existe en el sistema')
 
-                    # Verificar D_SN existente
-                    if Material.objects.filter(serial_manufacturer=equipo_data['serial_manufacturer']).exists():
-                        errores_fila.append('D_SN ya existe en el sistema')
+                    # D_SN solo verificar si tiene valor
+                    if d_sn and Material.objects.filter(serial_manufacturer=d_sn).exists():
+                        errores_fila.append('D-SN ya existe en el sistema')
 
                 # Registrar errores o equipos válidos
                 if errores_fila:
                     errores.append({
-                        'fila': equipo_data['fila'],
-                        'mac': equipo_data['mac_address'],
+                        'fila': fila_num,
+                        'mac': mac,
+                        'gpon': gpon_sn,
+                        'd_sn': d_sn,
                         'errores': errores_fila
                     })
                 else:
@@ -574,8 +607,15 @@ class ImportacionMasivaView(APIView):
                 'total_filas': len(df),
                 'validados': len(equipos_validos),
                 'errores': len(errores),
-                'item_equipo_aplicado': item_equipo
+                'item_equipo_aplicado': item_equipo,
+                'numero_entrega': numero_entrega,
+                'columna_d_sn_presente': 'D_SN' in df.columns
             }
+
+            print(f"📊 Procesamiento completado:")
+            print(f"   Total filas: {len(df)}")
+            print(f"   Equipos válidos: {len(equipos_validos)}")
+            print(f"   Errores: {len(errores)}")
 
             # Si es solo validación, devolver preview
             if es_validacion:
@@ -595,10 +635,11 @@ class ImportacionMasivaView(APIView):
                 return Response({
                     'success': False,
                     'error': 'No hay equipos válidos para importar',
-                    'resultado': resultado
+                    'resultado': resultado,
+                    'detalles_errores': errores[:20]  # Mostrar errores para debug
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # Proceder con la importación real
+            # ✅ PROCEDER CON LA IMPORTACIÓN REAL
             with transaction.atomic():
                 importados = 0
                 errores_importacion = []
@@ -607,21 +648,14 @@ class ImportacionMasivaView(APIView):
 
                 # Obtener referencias necesarias
                 try:
-                    # Tipo de material ONU
                     tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
-                    print(f"✅ Tipo material ONU encontrado: {tipo_onu}")
-
-                    # Estado inicial para ONU nuevo
                     estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
-                    print(f"✅ Estado NUEVO encontrado: {estado_nuevo}")
-
-                    # Tipo de ingreso NUEVO
                     tipo_ingreso_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
-                    print(f"✅ Tipo ingreso NUEVO encontrado: {tipo_ingreso_nuevo}")
 
-                    # Tipo de equipo (para compatibilidad) - AHORA modelo está disponible
-                    tipo_equipo = modelo.tipo_material
-                    print(f"✅ Tipo equipo del modelo: {tipo_equipo}")
+                    print(f"✅ Referencias obtenidas:")
+                    print(f"   Tipo ONU: {tipo_onu}")
+                    print(f"   Estado NUEVO: {estado_nuevo}")
+                    print(f"   Tipo ingreso NUEVO: {tipo_ingreso_nuevo}")
 
                 except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist, TipoIngreso.DoesNotExist) as e:
                     print(f"❌ Error obteniendo referencias: {e}")
@@ -630,23 +664,25 @@ class ImportacionMasivaView(APIView):
                         'error': f'Configuración incompleta: {str(e)}'
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-                # Crear cada material
+                # ✅ CREAR CADA MATERIAL
                 for index, equipo in enumerate(equipos_validos):
                     try:
                         print(f"📦 Creando material {index + 1}/{len(equipos_validos)}: MAC {equipo['mac_address']}")
 
-                        # Crear el material
                         material = Material.objects.create(
                             # Relaciones básicas
                             tipo_material=tipo_onu,
                             modelo=modelo,
                             lote=lote,
 
-                            # Datos del equipo ONU
+                            # ✅ DATOS DEL EQUIPO ONU - SN OPCIONAL
                             mac_address=equipo['mac_address'],
                             gpon_serial=equipo['gpon_serial'],
-                            serial_manufacturer=equipo['serial_manufacturer'],
+                            serial_manufacturer=equipo['serial_manufacturer'] or None,  # ✅ NULL si vacío
                             codigo_item_equipo=equipo['codigo_item_equipo'],
+
+                            # ✅ NÚMERO DE ENTREGA PARCIAL
+                            numero_entrega_parcial=numero_entrega,
 
                             # Ubicación y estado
                             almacen_actual=lote.almacen_destino,
@@ -659,6 +695,8 @@ class ImportacionMasivaView(APIView):
                             # Cantidad (1 para equipos únicos)
                             cantidad=1.00,
 
+                            # Observaciones
+                            observaciones=f"Importación masiva - Entrega #{numero_entrega}" if numero_entrega else "Importación masiva"
                         )
 
                         print(f"✅ Material creado: ID={material.id}, Código={material.codigo_interno}")
@@ -669,19 +707,30 @@ class ImportacionMasivaView(APIView):
                         print(f"❌ {error_msg}")
                         errores_importacion.append({
                             'mac': equipo['mac_address'],
+                            'gpon': equipo['gpon_serial'],
+                            'd_sn': equipo.get('serial_manufacturer', ''),
                             'error': str(e)
                         })
                         continue
 
                 print(f"🎯 Importación completada: {importados} materiales creados")
 
+                # ✅ ACTUALIZAR ESTADÍSTICAS DEL LOTE
+                try:
+                    if lote.cantidad_recibida >= lote.cantidad_total:
+                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
+                        lote.estado = estado_completa
+                    else:
+                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
+                        lote.estado = estado_parcial
+                    lote.save()
+                    print(f"✅ Estado del lote actualizado: {lote.estado.nombre}")
+                except EstadoLote.DoesNotExist:
+                    print("⚠️ No se pudo actualizar estado del lote")
+
                 # Actualizar estadísticas del resultado
                 resultado['importados'] = importados
                 resultado['errores_importacion'] = errores_importacion
-
-                # Verificar en base de datos
-                total_materiales_lote = Material.objects.filter(lote=lote).count()
-                print(f"📊 Total materiales en lote {lote.numero_lote}: {total_materiales_lote}")
 
             # Verificar resultados finales
             total_materiales_despues = Material.objects.count()
@@ -690,10 +739,11 @@ class ImportacionMasivaView(APIView):
             print(f"📊 Materiales en lote después: {materiales_lote_despues}")
             print(f"🎯 Diferencia: +{materiales_lote_despues - materiales_lote_antes}")
 
-            # Respuesta exitosa
+            # ✅ RESPUESTA EXITOSA
             return Response({
                 'success': True,
-                'message': f'Importación completada: {importados} equipos registrados',
+                'message': f'Importación completada: {importados} equipos registrados' +
+                           (f' en entrega #{numero_entrega}' if numero_entrega else ''),
                 'resultado': resultado
             })
 
@@ -713,12 +763,15 @@ class ImportacionMasivaView(APIView):
         """Obtener plantilla de importación y instrucciones"""
         return Response({
             'plantilla': {
-                'columnas_requeridas': ['D_SN', 'GPON_SN', 'MAC'],
+                'columnas_requeridas': ['GPON_SN', 'MAC'],
+                'columnas_opcionales': ['D_SN'],  # ✅ NUEVO
                 'formato_mac': 'XX:XX:XX:XX:XX:XX (mayúsculas, separado por :)',
+                'formato_gpon': 'Mínimo 8 caracteres (ej: HWTC12345678)',
+                'formato_d_sn': 'Mínimo 6 caracteres si se proporciona (OPCIONAL)',
                 'ejemplo': {
-                    'D_SN': 'SN123456789',
                     'GPON_SN': 'HWTC12345678',
-                    'MAC': '00:11:22:33:44:55'
+                    'MAC': '00:11:22:33:44:55',
+                    'D_SN': 'SN123456789 (OPCIONAL)'
                 },
                 'item_equipo_info': {
                     'descripcion': 'El código ITEM_EQUIPO se configura una vez para todo el lote',
@@ -726,27 +779,34 @@ class ImportacionMasivaView(APIView):
                     'ejemplo': '1234567890'
                 }
             },
+            'formatos_archivo_soportados': [
+                {
+                    'descripcion': 'Archivo completo con D_SN',
+                    'columnas': 'GPON_SN,MAC,D_SN',
+                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55,SN123456789'
+                },
+                {
+                    'descripcion': 'Archivo sin D_SN',
+                    'columnas': 'GPON_SN,MAC',
+                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55'
+                },
+                {
+                    'descripcion': 'Archivo con D_SN parcial',
+                    'columnas': 'GPON_SN,MAC,D_SN',
+                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55, (D_SN vacío permitido)'
+                }
+            ],
             'instrucciones': [
                 '1. Usar formato Excel (.xlsx) o CSV',
-                '2. La primera fila debe contener exactamente: D_SN, GPON_SN, MAC',
-                '3. No dejar filas vacías entre los datos',
-                '4. Verificar que todos los valores sean únicos',
-                '5. El archivo no debe ser mayor a 5MB',
-                '6. Máximo 1000 equipos por importación',
-                '7. ITEM_EQUIPO se configura en el modal (no en el archivo)'
-            ],
-            'validaciones': [
-                'D_SN: Mínimo 6 caracteres, único en el sistema',
-                'GPON_SN: Mínimo 8 caracteres, único en el sistema',
-                'MAC: Formato XX:XX:XX:XX:XX:XX, único en el sistema',
-                'ITEM_EQUIPO: 6-10 dígitos, se aplica a todos los equipos del lote'
-            ],
-            'formato_archivo': {
-                'encabezados': 'D_SN,GPON_SN,MAC',
-                'ejemplo_fila': 'SN123456789,HWTC12345678,00:11:22:33:44:55',
-                'separador_csv': 'Coma (,)',
-                'codificacion': 'UTF-8'
-            }
+                '2. Columnas obligatorias: GPON_SN, MAC',
+                '3. Columna opcional: D_SN (puede omitirse o estar vacía)',
+                '4. GPON_SN: mínimo 8 caracteres',
+                '5. MAC: formato XX:XX:XX:XX:XX:XX',
+                '6. D_SN: mínimo 6 caracteres si se proporciona',
+                '7. No dejar filas vacías entre los datos',
+                '8. Verificar que todos los valores sean únicos',
+                '9. Máximo 1000 equipos por importación'
+            ]
         })
 
 

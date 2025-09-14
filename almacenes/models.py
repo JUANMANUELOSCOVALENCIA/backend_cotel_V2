@@ -658,8 +658,13 @@ class Material(models.Model):
                                    help_text="MAC Address para equipos únicos")
     gpon_serial = models.CharField(max_length=100, blank=True, unique=True, null=True,
                                    help_text="GPON Serial para equipos únicos")
-    serial_manufacturer = models.CharField(max_length=100, blank=True, unique=True, null=True,
-                                           help_text="D-SN/Serial Manufacturer para equipos únicos")
+
+    serial_manufacturer = models.CharField(
+        max_length=100,
+        blank=True,  # Permitir vacío en formularios
+        null=True,  # Permitir NULL en base de datos
+        help_text="D-SN/Serial Manufacturer para equipos únicos (opcional)"
+    )
 
     # ELIMINADO: codigo_barras
     especificaciones_tecnicas = models.JSONField(default=dict, blank=True,
@@ -732,6 +737,41 @@ class Material(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # NUEVOS CAMPOS PARA ENTREGAS PARCIALES
+    numero_entrega_parcial = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Número de entrega parcial a la que pertenece este material"
+    )
+
+    # CAMPOS PARA REINGRESOS
+    equipo_original = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reingresos',
+        help_text="Equipo original que está siendo reemplazado (para reingresos)"
+    )
+
+    motivo_reingreso = models.TextField(
+        blank=True,
+        help_text="Motivo del reingreso/reposición"
+    )
+
+    # CAMPOS PARA OBSERVACIONES DE LABORATORIO
+    observaciones_laboratorio = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Observaciones detalladas del laboratorio"
+    )
+
+    numero_informe_laboratorio = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Número de informe de laboratorio"
+    )
+
     class Meta:
         db_table = 'almacenes_material'
         verbose_name = 'Material'
@@ -752,14 +792,24 @@ class Material(models.Model):
         if not self.codigo_item_equipo.isdigit():
             raise ValidationError("El código item equipo solo puede contener números")
 
-        # Validaciones específicas para equipos únicos
+        # Validaciones para equipos únicos
         if self.tipo_material.es_unico:
-            if not all([self.mac_address, self.gpon_serial, self.serial_manufacturer]):
-                raise ValidationError("Los equipos únicos requieren MAC Address, GPON Serial y Serial Manufacturer")
-
-            # Validar formato de MAC Address
+            # ✅ MAC obligatorio con formato
+            if not self.mac_address:
+                raise ValidationError("Los equipos únicos requieren MAC Address")
             if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', self.mac_address.upper()):
-                raise ValidationError("Formato de MAC Address inválido")
+                raise ValidationError("Formato de MAC Address inválido. Use XX:XX:XX:XX:XX:XX")
+
+            # ✅ GPON obligatorio con formato
+            if not self.gpon_serial:
+                raise ValidationError("Los equipos únicos requieren GPON Serial")
+            if len(self.gpon_serial) < 8:
+                raise ValidationError("GPON Serial debe tener al menos 8 caracteres")
+
+            # ✅ SN OPCIONAL pero con formato si se proporciona
+            if self.serial_manufacturer:  # Solo validar si tiene valor
+                if len(self.serial_manufacturer) < 6:
+                    raise ValidationError("D-SN debe tener al menos 6 caracteres si se proporciona")
 
     def save(self, *args, **kwargs):
         # Generar código interno si no existe
@@ -1150,6 +1200,52 @@ class HistorialMaterial(models.Model):
 
     def __str__(self):
         return f"{self.material.codigo_interno} - {self.motivo} ({self.fecha_cambio})"
+
+# En almacenes/models.py
+
+class InspeccionLaboratorio(models.Model):
+    """Modelo para registrar inspecciones detalladas de laboratorio"""
+
+    material = models.ForeignKey(
+        Material,
+        on_delete=models.CASCADE,
+        related_name='inspecciones_laboratorio'
+    )
+
+    numero_informe = models.CharField(max_length=50, unique=True)
+
+    # Resultados de inspección
+    serie_logica_ok = models.BooleanField(help_text="Serie lógica coincide")
+    wifi_24_ok = models.BooleanField(help_text="WiFi 2.4GHz funciona")
+    wifi_5_ok = models.BooleanField(help_text="WiFi 5GHz funciona")
+    puerto_ethernet_ok = models.BooleanField(help_text="Puerto Ethernet OK")
+    puerto_lan_ok = models.BooleanField(help_text="Puerto LAN OK")
+
+    # Resultado general
+    aprobado = models.BooleanField()
+
+    # Observaciones
+    observaciones_tecnico = models.TextField(blank=True)
+    comentarios_adicionales = models.TextField(blank=True)
+    fallas_detectadas = models.JSONField(default=list, blank=True)
+
+    # Información del proceso
+    tecnico_revisor = models.CharField(max_length=50, blank=True)
+    tiempo_inspeccion_minutos = models.PositiveIntegerField(default=0)
+
+    # Auditoría
+    fecha_inspeccion = models.DateTimeField(auto_now_add=True)
+    usuario_responsable = models.ForeignKey(
+        'usuarios.Usuario',
+        on_delete=models.CASCADE
+    )
+
+    class Meta:
+        db_table = 'almacenes_inspeccion_laboratorio'
+        ordering = ['-fecha_inspeccion']
+
+    def __str__(self):
+        return f"{self.numero_informe} - {self.material.codigo_interno}"
 
 # ========== FUNCIÓN PARA CREAR DATOS INICIALES ==========
 

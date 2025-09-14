@@ -41,9 +41,10 @@ from .views import (
     InicializarDatosView,
 )
 from .views.compatibility_views import ModeloComponenteViewSet
+from .views.laboratorio_views import InspeccionLaboratorioView
 
 # IMPORTAR MaterialViewSet SOLO UNA VEZ
-from .views.material_views import MaterialViewSet
+from .views.material_views import MaterialViewSet, ReingresoMaterialView
 
 # ========== CONFIGURACIÓN DEL ROUTER ==========
 router = DefaultRouter()
@@ -113,7 +114,8 @@ urlpatterns = [
     # --- CONFIGURACIÓN Y DATOS ---
     path('opciones-completas/', OpcionesCompletasView.as_view(), name='opciones-completas'),
     path('inicializar-datos/', InicializarDatosView.as_view(), name='inicializar-datos'),
-
+    path('laboratorio/inspeccion/', InspeccionLaboratorioView.as_view(), name='inspeccion-laboratorio'),
+    path('materiales/reingreso/', ReingresoMaterialView.as_view(), name='reingreso-material'),
     # QUITAR ESTA LÍNEA REDUNDANTE:
     # path('materiales/', include(router.urls)),
 ]

@@ -33,7 +33,7 @@ from .models import (
     # Modelos de operaciones
     TraspasoAlmacen, TraspasoMaterial,
     DevolucionProveedor, DevolucionMaterial,
-    HistorialMaterial,
+    HistorialMaterial, InspeccionLaboratorio,
 )
 
 
@@ -672,12 +672,24 @@ class MaterialSerializer(serializers.ModelSerializer):
         }
 
     def validate_mac_address(self, value):
-        """Validar MAC Address para equipos únicos"""
+        """Validar MAC Address con formato mantenido"""
         if value:
             value = value.upper().replace('-', ':')
             if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', value):
                 raise serializers.ValidationError("Formato de MAC inválido. Use XX:XX:XX:XX:XX:XX")
         return value
+
+    def validate_gpon_serial(self, value):
+        """Validar GPON Serial con formato mantenido"""
+        if value and len(value) < 8:
+            raise serializers.ValidationError("GPON Serial debe tener al menos 8 caracteres")
+        return value
+
+    def validate_serial_manufacturer(self, value):
+        """Validar D-SN con formato mantenido - OPCIONAL"""
+        if value and len(value) < 6:  # ✅ Solo validar si tiene valor
+            raise serializers.ValidationError("D-SN debe tener al menos 6 caracteres si se proporciona")
+        return value or None  # ✅ Convertir string vacío a None
 
     def validate_codigo_item_equipo(self, value):
         if not (6 <= len(value) <= 10) or not value.isdigit():
@@ -689,7 +701,7 @@ class MaterialSerializer(serializers.ModelSerializer):
 
         # Validaciones específicas para equipos únicos
         if tipo_material and tipo_material.es_unico:
-            required_fields = ['mac_address', 'gpon_serial', 'serial_manufacturer']
+            required_fields = ['mac_address', 'gpon_serial']
             for field in required_fields:
                 if not data.get(field) and (not self.instance or not getattr(self.instance, field, None)):
                     raise serializers.ValidationError(f"Los equipos únicos requieren {field}")
@@ -1740,3 +1752,29 @@ class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
                     )
 
         return instance
+
+
+# En almacenes/serializers.py
+
+class InspeccionLaboratorioSerializer(serializers.ModelSerializer):
+    material_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InspeccionLaboratorio
+        fields = '__all__'
+
+    def get_material_info(self, obj):
+        return {
+            'codigo_interno': obj.material.codigo_interno,
+            'mac_address': obj.material.mac_address,
+            'modelo': obj.material.modelo.nombre
+        }
+
+
+class ReingresoMaterialSerializer(serializers.Serializer):
+    material_original_id = serializers.IntegerField()
+    mac_address = serializers.CharField(max_length=17)
+    gpon_serial = serializers.CharField(max_length=100)
+    serial_manufacturer = serializers.CharField(max_length=100)
+    codigo_item_equipo = serializers.CharField(max_length=10)
+    motivo_reingreso = serializers.CharField(required=False)
