@@ -388,7 +388,7 @@ class EntregaParcialLoteSerializer(serializers.ModelSerializer):
     class Meta:
         model = EntregaParcialLote
         fields = [
-            'id', 'numero_entrega', 'fecha_entrega', 'cantidad_entregada',
+            'id', 'lote', 'numero_entrega', 'fecha_entrega', 'cantidad_entregada',
             'estado_entrega', 'estado_entrega_info', 'observaciones',
             'created_at', 'created_by', 'created_by_nombre'
         ]

@@ -99,6 +99,15 @@ class LoteViewSet(viewsets.ModelViewSet):
         # Entregas parciales
         entregas = lote.entregas_parciales.all().order_by('numero_entrega')
 
+        @action(detail=True, methods=['get'])
+        def entregas_parciales(self, request, pk=None):
+            """Obtener entregas parciales de un lote"""
+            lote = self.get_object()
+            entregas = lote.entregas_parciales.all().order_by('numero_entrega')
+
+            serializer = EntregaParcialLoteSerializer(entregas, many=True)
+            return Response(serializer.data)
+
         return Response({
             'lote': {
                 'id': lote.id,
