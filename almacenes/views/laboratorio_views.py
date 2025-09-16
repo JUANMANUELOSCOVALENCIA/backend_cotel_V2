@@ -130,7 +130,6 @@ class LaboratorioView(APIView):
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-
 class LaboratorioMasivoView(APIView):
     """View para operaciones masivas de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
@@ -309,10 +308,10 @@ class LaboratorioMasivoView(APIView):
             'materiales_enviados': count
         })
 
-
 class LaboratorioConsultaView(APIView):
     """View para consultas específicas de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
+    basename = 'laboratorio'
 
     def get(self, request):
         """Diferentes tipos de consultas de laboratorio"""
@@ -487,12 +486,10 @@ class LaboratorioConsultaView(APIView):
             'historial': historial_data
         })
 
-
-# En almacenes/views/laboratorio_views.py
-
 class InspeccionLaboratorioView(APIView):
     """View para inspecciones detalladas de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
+    basename = 'laboratorio'
 
     def post(self, request):
         """Registrar inspección detallada"""
