@@ -27,6 +27,7 @@ from ..serializers import (
 class LaboratorioView(APIView):
     """View principal para operaciones de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
+    basename = 'laboratorio'
 
     def get(self, request):
         """Dashboard de laboratorio con estadísticas"""
@@ -133,6 +134,7 @@ class LaboratorioView(APIView):
 class LaboratorioMasivoView(APIView):
     """View para operaciones masivas de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
+    basename = 'laboratorio'
 
     def post(self, request):
         """Operaciones masivas en laboratorio"""

@@ -33,7 +33,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
         'almacen_origen', 'almacen_destino', 'usuario_envio', 'usuario_recepcion', 'estado'
     ).prefetch_related('materiales__material')
     permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    basename = 'traspasos'
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
@@ -525,8 +525,8 @@ class DevolucionProveedorViewSet(viewsets.ModelViewSet):
     queryset = DevolucionProveedor.objects.all().select_related(
         'lote_origen__proveedor', 'proveedor', 'created_by', 'estado', 'respuesta_proveedor'
     ).prefetch_related('materiales_devueltos__material')
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated,GenericRolePermission]
+    basename = 'devoluciones'
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
