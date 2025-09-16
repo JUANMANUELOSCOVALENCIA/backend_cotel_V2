@@ -341,35 +341,36 @@ class LaboratorioConsultaView(APIView):
             estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
         except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
             return Response(
-                {'error': 'Configuración de laboratorio incompleta'},
+                {'error': 'Configuración de estados de laboratorio incompleta'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+        # ✅ CONSULTA OPTIMIZADA CON TODA LA INFORMACIÓN EXPANDIDA
         materiales = Material.objects.filter(
             tipo_material=tipo_onu,
             estado_onu=estado_laboratorio
+        ).select_related(
+            'modelo__marca',
+            'modelo__tipo_material',
+            'lote__proveedor',
+            'lote__almacen_destino',
+            'almacen_actual',
+            'tipo_material',
+            'estado_onu'
+        ).prefetch_related(
+            'lote__entregas_parciales'
         ).order_by('fecha_envio_laboratorio')
 
-        # Calcular días en laboratorio para cada material
-        materiales_data = []
-        for material in materiales:
-            dias_en_laboratorio = material.dias_en_laboratorio
-            materiales_data.append({
-                'id': material.id,
-                'codigo_interno': material.codigo_interno,
-                'mac_address': material.mac_address,
-                'modelo': f"{material.modelo.marca.nombre} {material.modelo.nombre}",
-                'lote': material.lote.numero_lote,
-                'almacen': material.almacen_actual.nombre,
-                'fecha_envio': material.fecha_envio_laboratorio,
-                'dias_en_laboratorio': dias_en_laboratorio,
-                'alerta_tiempo': dias_en_laboratorio > 15
-            })
+        # ✅ USAR SERIALIZER CON CONTEXTO
+        serializer = MaterialListSerializer(
+            materiales,
+            many=True,
+            context={'request': request}
+        )
 
         return Response({
-            'total': len(materiales_data),
-            'materiales': materiales_data,
-            'alertas_tiempo': sum(1 for m in materiales_data if m['alerta_tiempo'])
+            'total': materiales.count(),
+            'materiales': serializer.data
         })
 
     def _pendientes_inspeccion(self, request):
@@ -384,13 +385,30 @@ class LaboratorioConsultaView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+        # ✅ CONSULTA OPTIMIZADA CON TODA LA INFORMACIÓN EXPANDIDA
         materiales = Material.objects.filter(
             tipo_material=tipo_onu,
             es_nuevo=True,
             estado_onu=estado_nuevo
-        ).select_related('modelo__marca', 'lote', 'almacen_actual')
+        ).select_related(
+            'modelo__marca',
+            'modelo__tipo_material',
+            'lote__proveedor',
+            'lote__almacen_destino',
+            'almacen_actual',
+            'tipo_material',
+            'estado_onu'
+        ).prefetch_related(
+            'lote__entregas_parciales'
+        ).order_by('lote__numero_lote', 'numero_entrega_parcial')
 
-        serializer = MaterialListSerializer(materiales, many=True)
+        # ✅ USAR SERIALIZER CON CONTEXTO
+        serializer = MaterialListSerializer(
+            materiales,
+            many=True,
+            context={'request': request}
+        )
+
         return Response({
             'total': materiales.count(),
             'materiales': serializer.data,
@@ -411,28 +429,28 @@ class LaboratorioConsultaView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+        # ✅ CONSULTA OPTIMIZADA
         materiales = Material.objects.filter(
             tipo_material=tipo_onu,
             estado_onu=estado_laboratorio,
             fecha_envio_laboratorio__lt=fecha_limite
-        ).select_related('modelo__marca', 'lote', 'almacen_actual')
+        ).select_related(
+            'modelo__marca',
+            'modelo__tipo_material',
+            'lote__proveedor',
+            'almacen_actual'
+        )
 
-        materiales_data = []
-        for material in materiales:
-            materiales_data.append({
-                'id': material.id,
-                'codigo_interno': material.codigo_interno,
-                'mac_address': material.mac_address,
-                'modelo': f"{material.modelo.marca.nombre} {material.modelo.nombre}",
-                'lote': material.lote.numero_lote,
-                'fecha_envio': material.fecha_envio_laboratorio,
-                'dias_en_laboratorio': material.dias_en_laboratorio
-            })
+        serializer = MaterialListSerializer(
+            materiales,
+            many=True,
+            context={'request': request}
+        )
 
         return Response({
             'criterio': f'Más de {dias_limite} días en laboratorio',
-            'total': len(materiales_data),
-            'materiales': materiales_data
+            'total': materiales.count(),
+            'materiales': serializer.data
         })
 
     def _historial_laboratorio(self, request):

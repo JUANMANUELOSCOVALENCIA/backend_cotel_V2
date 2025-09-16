@@ -710,26 +710,134 @@ class MaterialSerializer(serializers.ModelSerializer):
 
 
 class MaterialListSerializer(serializers.ModelSerializer):
-    """Serializer optimizado para listados"""
-    modelo_completo = serializers.SerializerMethodField()
+    """Serializer optimizado para listados con información expandida"""
+    modelo_info = serializers.SerializerMethodField()
+    lote_info = serializers.SerializerMethodField()
+    almacen_info = serializers.SerializerMethodField()
+    entrega_parcial_info = serializers.SerializerMethodField()
+    estado_display = serializers.SerializerMethodField()
     tipo_material_info = serializers.SerializerMethodField()
-    estado_display = serializers.ReadOnlyField()
-    almacen_codigo = serializers.CharField(source='almacen_actual.codigo', read_only=True)
-    lote_numero = serializers.CharField(source='lote.numero_lote', read_only=True)
 
     class Meta:
         model = Material
         fields = [
-            'id', 'codigo_interno', 'tipo_material_info', 'modelo_completo',
-            'mac_address', 'gpon_serial', 'almacen_codigo', 'lote_numero',
-            'estado_display', 'es_nuevo', 'cantidad', 'created_at'
+            'id', 'codigo_interno', 'mac_address', 'gpon_serial',
+            'serial_manufacturer', 'codigo_item_equipo', 'cantidad',
+            'es_nuevo', 'numero_entrega_parcial',
+            'created_at', 'updated_at',
+            'modelo_info', 'lote_info', 'almacen_info',
+            'entrega_parcial_info', 'estado_display', 'tipo_material_info'
         ]
 
-    def get_modelo_completo(self, obj):
-        return f"{obj.modelo.marca.nombre} {obj.modelo.nombre}"
+    def get_modelo_info(self, obj):
+        """✅ INFORMACIÓN COMPLETA DEL MODELO"""
+        return {
+            'id': obj.modelo.id,
+            'nombre': obj.modelo.nombre,
+            'codigo_modelo': obj.modelo.codigo_modelo,
+            'marca': obj.modelo.marca.nombre if obj.modelo.marca else 'Sin Marca',
+            'tipo_material': obj.modelo.tipo_material.nombre if obj.modelo.tipo_material else 'Sin Tipo'
+        }
+
+    def get_lote_info(self, obj):
+        """✅ INFORMACIÓN COMPLETA DEL LOTE"""
+        return {
+            'id': obj.lote.id,
+            'numero_lote': obj.lote.numero_lote,
+            'proveedor_info': {
+                'id': obj.lote.proveedor.id if obj.lote.proveedor else None,
+                'nombre_comercial': obj.lote.proveedor.nombre_comercial if obj.lote.proveedor else 'Sin Proveedor'
+            },
+            'fecha_recepcion': obj.lote.fecha_recepcion,
+            'almacen_destino_info': {
+                'id': obj.lote.almacen_destino.id if obj.lote.almacen_destino else None,
+                'nombre': obj.lote.almacen_destino.nombre if obj.lote.almacen_destino else 'Sin Almacén',
+                'codigo': obj.lote.almacen_destino.codigo if obj.lote.almacen_destino else None
+            }
+        }
+
+    def get_almacen_info(self, obj):
+        """✅ INFORMACIÓN COMPLETA DEL ALMACÉN ACTUAL"""
+        return {
+            'id': obj.almacen_actual.id,
+            'codigo': obj.almacen_actual.codigo,
+            'nombre': obj.almacen_actual.nombre,
+            'ciudad': getattr(obj.almacen_actual, 'ciudad', None)
+        }
+
+    def get_entrega_parcial_info(self, obj):
+        """Información de entrega parcial - versión simplificada"""
+
+        try:
+            # Verificar si el material tiene numero_entrega_parcial
+            numero_entrega = getattr(obj, 'numero_entrega_parcial', None)
+
+            if numero_entrega and numero_entrega > 0:
+                # Buscar la entrega parcial específica
+                try:
+                    entrega = obj.lote.entregas_parciales.get(numero_entrega=numero_entrega)
+                    return {
+                        'id': entrega.id,
+                        'numero_entrega': entrega.numero_entrega,
+                        'fecha_entrega': entrega.fecha_entrega,
+                        'cantidad_entregada': entrega.cantidad_entregada,
+                        'observaciones': entrega.observaciones or '',
+                        'es_parcial': True
+                    }
+                except Exception as e:
+                    # Si no encuentra la entrega, devolver info básica
+                    return {
+                        'id': None,
+                        'numero_entrega': numero_entrega,
+                        'fecha_entrega': None,
+                        'cantidad_entregada': None,
+                        'observaciones': f'Entrega #{numero_entrega} (no encontrada)',
+                        'es_parcial': True
+                    }
+
+            # Si no hay numero_entrega_parcial, es recepción inicial
+            return {
+                'id': None,
+                'numero_entrega': 0,
+                'fecha_entrega': obj.lote.fecha_recepcion if obj.lote.fecha_recepcion else obj.created_at.date(),
+                'cantidad_entregada': 1,
+                'observaciones': 'Recepción inicial del lote',
+                'es_parcial': False
+            }
+
+        except Exception as e:
+            # Fallback en caso de cualquier error
+            return {
+                'id': None,
+                'numero_entrega': 0,
+                'fecha_entrega': None,
+                'cantidad_entregada': 1,
+                'observaciones': 'Información no disponible',
+                'es_parcial': False
+            }
+
+    def get_estado_display(self, obj):
+        if obj.tipo_material.es_unico and obj.estado_onu:
+            return {
+                'id': obj.estado_onu.id,
+                'codigo': obj.estado_onu.codigo,
+                'nombre': obj.estado_onu.nombre,
+                'color': getattr(obj.estado_onu, 'color', '#gray'),
+                'permite_asignacion': getattr(obj.estado_onu, 'permite_asignacion', False)
+            }
+        elif not obj.tipo_material.es_unico and obj.estado_general:
+            return {
+                'id': obj.estado_general.id,
+                'codigo': obj.estado_general.codigo,
+                'nombre': obj.estado_general.nombre,
+                'color': getattr(obj.estado_general, 'color', '#gray'),
+                'permite_consumo': getattr(obj.estado_general, 'permite_consumo', False)
+            }
+        return None
 
     def get_tipo_material_info(self, obj):
         return {
+            'id': obj.tipo_material.id,
             'codigo': obj.tipo_material.codigo,
             'nombre': obj.tipo_material.nombre,
             'es_unico': obj.tipo_material.es_unico
