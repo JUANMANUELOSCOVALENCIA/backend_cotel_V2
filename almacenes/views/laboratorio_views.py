@@ -147,6 +147,8 @@ class LaboratorioMasivoView(APIView):
             return self._retornar_masivo(request, criterios)
         elif accion == 'enviar_pendientes':
             return self._enviar_pendientes_inspeccion(request)
+        elif accion == 'enviar_entrega_parcial':
+            return self._enviar_entrega_parcial(request, criterios)
         else:
             return Response(
                 {'error': 'Acción no válida'},
@@ -310,6 +312,66 @@ class LaboratorioMasivoView(APIView):
             'materiales_enviados': count
         })
 
+    def _enviar_entrega_parcial(self, request, criterios):
+        """Enviar todos los materiales de una entrega parcial específica a laboratorio"""
+        lote_id = criterios.get('lote_id')
+        numero_entrega = criterios.get('numero_entrega')
+
+        if not lote_id:
+            return Response(
+                {'error': 'ID de lote requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if numero_entrega is None:
+            return Response(
+                {'error': 'Número de entrega requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            lote = Lote.objects.get(id=lote_id)
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+        except (Lote.DoesNotExist, TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
+            return Response(
+                {'error': 'Lote no encontrado o configuración incompleta'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Filtrar materiales de la entrega específica
+        materiales_entrega = Material.objects.filter(
+            lote=lote,
+            tipo_material=tipo_onu,
+            es_nuevo=True,
+            estado_onu=estado_nuevo,
+            numero_entrega_parcial=numero_entrega
+        )
+
+        if not materiales_entrega.exists():
+            return Response(
+                {'message': f'No hay materiales nuevos en la entrega #{numero_entrega} del lote {lote.numero_lote}'},
+                status=status.HTTP_200_OK
+            )
+
+        with transaction.atomic():
+            count = 0
+            for material in materiales_entrega:
+                material.enviar_a_laboratorio(usuario=request.user)
+                count += 1
+
+        # Descripción de la entrega
+        descripcion_entrega = f'Entrega #{numero_entrega}' if numero_entrega > 0 else 'Recepción inicial'
+
+        return Response({
+            'success': True,
+            'message': f'{descripcion_entrega} del lote {lote.numero_lote} enviada a laboratorio',
+            'materiales_enviados': count,
+            'lote': lote.numero_lote,
+            'numero_entrega': numero_entrega,
+            'descripcion_entrega': descripcion_entrega
+        })
+
 class LaboratorioConsultaView(APIView):
     """View para consultas específicas de laboratorio"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
@@ -385,7 +447,7 @@ class LaboratorioConsultaView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # ✅ CONSULTA OPTIMIZADA CON TODA LA INFORMACIÓN EXPANDIDA
+        # ✅ CONSULTA OPTIMIZADA (tu código actual)
         materiales = Material.objects.filter(
             tipo_material=tipo_onu,
             es_nuevo=True,
@@ -402,6 +464,17 @@ class LaboratorioConsultaView(APIView):
             'lote__entregas_parciales'
         ).order_by('lote__numero_lote', 'numero_entrega_parcial')
 
+        # 🔍 DEBUG TEMPORAL
+        print("🔍 === DEBUG LABORATORIO PENDIENTES ===")
+        print(f"🔍 Total materiales encontrados: {materiales.count()}")
+        if materiales.exists():
+            primer_material = materiales.first()
+            print(f"🔍 Primer material:")
+            print(f"  - ID: {primer_material.id}")
+            print(f"  - Codigo: {primer_material.codigo_interno}")
+            print(f"  - numero_entrega_parcial: {primer_material.numero_entrega_parcial}")
+            print(f"  - Lote: {primer_material.lote.numero_lote}")
+
         # ✅ USAR SERIALIZER CON CONTEXTO
         serializer = MaterialListSerializer(
             materiales,
@@ -409,9 +482,18 @@ class LaboratorioConsultaView(APIView):
             context={'request': request}
         )
 
+        # 🔍 DEBUG DEL SERIALIZER
+        data = serializer.data
+        if data:
+            print(f"🔍 Primer item serializado:")
+            print(f"  - Keys: {list(data[0].keys())}")
+            print(f"  - numero_entrega_parcial en data: {'numero_entrega_parcial' in data[0]}")
+            if 'numero_entrega_parcial' in data[0]:
+                print(f"  - Valor: {data[0]['numero_entrega_parcial']}")
+
         return Response({
             'total': materiales.count(),
-            'materiales': serializer.data,
+            'materiales': data,
             'mensaje': 'Estos materiales requieren inspección inicial obligatoria'
         })
 
@@ -531,7 +613,7 @@ class InspeccionLaboratorioView(APIView):
                 observaciones_tecnico=data.get('observaciones_tecnico', ''),
                 comentarios_adicionales=data.get('comentarios_adicionales', ''),
                 fallas_detectadas=data.get('fallas_detectadas', []),
-                tecnico_revisor=data.get('tecnico_revisor', ''),
+                tecnico_revisor=request.user.codigocotel if request.user else data.get('tecnico_revisor', ''),
                 tiempo_inspeccion_minutos=data.get('tiempo_inspeccion_minutos', 0),
                 usuario_responsable=request.user
             )
@@ -585,15 +667,23 @@ class InspeccionLaboratorioView(APIView):
         material_id = request.query_params.get('material_id')
 
         if material_id:
-            inspecciones = InspeccionLaboratorio.objects.filter(
+            inspecciones = (InspeccionLaboratorio.objects.filter(
                 material_id=material_id
-            ).order_by('-fecha_inspeccion')
+            ).select_related(
+            'material__modelo__marca',
+                'material__lote__proveedor',
+                'usuario_responsable'
+            ).order_by('-fecha_inspeccion'))
         else:
             # Últimas inspecciones
             days = int(request.query_params.get('days', 7))
             fecha_desde = timezone.now() - timedelta(days=days)
             inspecciones = InspeccionLaboratorio.objects.filter(
                 fecha_inspeccion__gte=fecha_desde
+            ).select_related(
+                'material__modelo__marca',
+                'material__lote__proveedor',
+                'usuario_responsable'
             ).order_by('-fecha_inspeccion')
 
         data = []
@@ -604,23 +694,40 @@ class InspeccionLaboratorioView(APIView):
                 'material': {
                     'id': insp.material.id,
                     'codigo_interno': insp.material.codigo_interno,
-                    'mac_address': insp.material.mac_address
+                    'mac_address': insp.material.mac_address,
+                    'gpon_serial': insp.material.gpon_serial,
+                    'modelo': {
+                        'id': insp.material.modelo.id,
+                        'codigo': insp.material.modelo.nombre,
+                        'marca': insp.material.modelo.nombre if insp.material.modelo.marca else 'Sin Marca',
+                    },
+                    'lote': {
+                        'id': insp.material.lote.id,
+                        'numero_lote': insp.material.lote.numero_lote,
+                        'proveedor': insp.material.lote.proveedor.nombre_comercial if insp.material.lote.proveedor else 'Sin Proveedor'
+                    }
                 },
                 'resultados': {
-                    'serie_logica_ok': insp.serie_logica_ok,
-                    'wifi_24_ok': insp.wifi_24_ok,
-                    'wifi_5_ok': insp.wifi_5_ok,
-                    'puerto_ethernet_ok': insp.puerto_ethernet_ok,
-                    'puerto_lan_ok': insp.puerto_lan_ok,
-                    'aprobado': insp.aprobado
-                },
-                'observaciones_tecnico': insp.observaciones_tecnico,
-                'comentarios_adicionales': insp.comentarios_adicionales,
-                'fallas_detectadas': insp.fallas_detectadas,
-                'tecnico_revisor': insp.tecnico_revisor,
-                'tiempo_inspeccion_minutos': insp.tiempo_inspeccion_minutos,
-                'fecha_inspeccion': insp.fecha_inspeccion
-            })
+                'serie_logica_ok': insp.serie_logica_ok,
+                'wifi_24_ok': insp.wifi_24_ok,
+                'wifi_5_ok': insp.wifi_5_ok,
+                'puerto_ethernet_ok': insp.puerto_ethernet_ok,
+                'puerto_lan_ok': insp.puerto_lan_ok,
+                'aprobado': insp.aprobado
+            },
+            'observaciones_tecnico': insp.observaciones_tecnico,
+            'comentarios_adicionales': insp.comentarios_adicionales,
+            'fallas_detectadas': insp.fallas_detectadas,
+            'tecnico_revisor': insp.tecnico_revisor,
+            'tiempo_inspeccion_minutos': insp.tiempo_inspeccion_minutos,
+            # ✅ CORREGIR: Formato de fecha
+            'fecha_inspeccion': insp.fecha_inspeccion.isoformat() if insp.fecha_inspeccion else None,
+            'usuario_responsable': {
+                'id': insp.usuario_responsable.id if insp.usuario_responsable else None,
+                'nombres': insp.usuario_responsable.nombres if insp.usuario_responsable else None,
+                'codigocotel': insp.usuario_responsable.codigocotel if insp.usuario_responsable else None
+            }
+        })
 
         return Response({
             'inspecciones': data,
