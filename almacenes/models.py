@@ -772,6 +772,15 @@ class Material(models.Model):
         help_text="Número de informe de laboratorio"
     )
 
+    material_reemplazo = models.OneToOneField(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='material_original',
+        help_text='Material que reemplaza a este (en caso de devolución/reposición)'
+    )
+
     class Meta:
         db_table = 'almacenes_material'
         verbose_name = 'Material'

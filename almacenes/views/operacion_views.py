@@ -964,3 +964,97 @@ class DevolucionProveedorViewSet(viewsets.ModelViewSet):
             'alertas': alertas,
             'total_alertas': len(alertas)
         })
+
+    @action(detail=False, methods=['get'])
+    def materiales_disponibles(self, request):
+        """Obtener materiales defectuosos disponibles para devolución"""
+        try:
+            # Buscar estado DEFECTUOSO
+            try:
+                estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+            except EstadoMaterialONU.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': 'Estado DEFECTUOSO no configurado en el sistema',
+                    'materiales': [],
+                    'count': 0
+                })
+
+            # Filtrar materiales defectuosos
+            materiales_query = Material.objects.filter(
+                estado_onu=estado_defectuoso,
+                tipo_material__es_unico=True  # Solo equipos únicos (ONU)
+            ).select_related(
+                'modelo', 'modelo__marca', 'lote', 'lote__proveedor', 'almacen_actual'
+            )
+
+            # Filtrar por lote si se especifica
+            lote_id = request.query_params.get('lote_id')
+            if lote_id:
+                try:
+                    materiales_query = materiales_query.filter(lote_id=int(lote_id))
+                except (ValueError, TypeError):
+                    pass
+
+            # Excluir materiales que ya están en devoluciones activas
+            try:
+                materiales_query = materiales_query.exclude(
+                    devolucionmaterial__devolucion__estado__codigo__in=['PENDIENTE', 'ENVIADO']
+                )
+            except Exception:
+                # Si falla esta consulta, continuar sin el filtro
+                pass
+
+            # Limitar resultados
+            materiales = materiales_query[:100]
+
+            # Serializar los materiales
+            materiales_data = []
+            for material in materiales:
+                try:
+                    material_data = {
+                        'id': material.id,
+                        'codigo_interno': material.codigo_interno,
+                        'mac_address': material.mac_address or '',
+                        'gpon_serial': material.gpon_serial or '',
+                        'serial_manufacturer': material.serial_manufacturer or '',
+                        'modelo_info': {
+                            'id': material.modelo.id if material.modelo else None,
+                            'nombre': material.modelo.nombre if material.modelo else 'N/A',
+                            'marca': material.modelo.marca.nombre if (material.modelo and hasattr(material.modelo,
+                                                                                                  'marca') and material.modelo.marca) else 'N/A'
+                        },
+                        'lote_info': {
+                            'id': material.lote.id if material.lote else None,
+                            'numero_lote': material.lote.numero_lote if material.lote else 'N/A',
+                            'proveedor': material.lote.proveedor.nombre_comercial if (
+                                        material.lote and material.lote.proveedor) else 'N/A'
+                        },
+                        'almacen_actual': material.almacen_actual.nombre if material.almacen_actual else 'N/A',
+                        'estado_onu': material.estado_onu.nombre if material.estado_onu else 'N/A'
+                    }
+                    materiales_data.append(material_data)
+                except Exception as e:
+                    # Si hay error con un material específico, continuar
+                    print(f"Error al serializar material {material.id}: {e}")
+                    continue
+
+            return Response({
+                'success': True,
+                'count': len(materiales_data),
+                'materiales': materiales_data,
+                'debug_info': {
+                    'lote_filtro': lote_id,
+                    'estado_buscado': 'DEFECTUOSO',
+                    'total_encontrados': len(materiales_data)
+                }
+            })
+
+        except Exception as e:
+            print(f"Error en materiales_disponibles: {e}")
+            return Response({
+                'success': False,
+                'error': f'Error al cargar materiales: {str(e)}',
+                'materiales': [],
+                'count': 0
+            })

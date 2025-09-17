@@ -1072,12 +1072,6 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         f"El material {material.codigo_interno} debe estar defectuoso para devolverlo"
                     )
-            else:
-                # Para materiales generales, verificar estado defectuoso
-                if not material.estado_general or material.estado_general.codigo != 'DEFECTUOSO':
-                    raise serializers.ValidationError(
-                        f"El material {material.codigo_interno} debe estar defectuoso para devolverlo"
-                    )
 
         return value
 
@@ -1104,17 +1098,23 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
 
         with transaction.atomic():
-            # Buscar estado inicial
+            # Obtener el lote para obtener el proveedor
+            lote_origen = validated_data['lote_origen']
+
+            # Buscar estado inicial - SIN usar Response
             try:
                 estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
-                validated_data['estado'] = estado_pendiente
             except EstadoDevolucion.DoesNotExist:
-                pass
+                # ARROJAR UNA EXCEPCIÓN, NO Response
+                raise serializers.ValidationError("Estado PENDIENTE no configurado en el sistema")
 
             # Crear devolución
             devolucion = DevolucionProveedor.objects.create(
-                **validated_data,
-                proveedor=validated_data['lote_origen'].proveedor,
+                lote_origen=lote_origen,
+                proveedor=lote_origen.proveedor,
+                motivo=validated_data['motivo'],
+                numero_informe_laboratorio=validated_data['numero_informe_laboratorio'],
+                estado=estado_pendiente,
                 created_by=request.user if request else None
             )
 
@@ -1126,28 +1126,10 @@ class DevolucionCreateSerializer(serializers.ModelSerializer):
                     material=material
                 )
 
-                # Actualizar estado del material
-                if material.tipo_material.es_unico:
-                    try:
-                        estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_PROVEEDOR', activo=True)
-                        material.estado_onu = estado_devuelto
-                    except EstadoMaterialONU.DoesNotExist:
-                        pass
-                else:
-                    try:
-                        estado_baja = EstadoMaterialGeneral.objects.get(codigo='DADO_DE_BAJA', activo=True)
-                        material.estado_general = estado_baja
-                    except EstadoMaterialGeneral.DoesNotExist:
-                        pass
-
-                material.save()
-
         return devolucion
 
     def to_representation(self, instance):
-        return DevolucionProveedorSerializer(instance).data
-
-
+        return DevolucionProveedorSerializer(instance, context=self.context).data
 # ========== SERIALIZERS DE HISTORIAL ==========
 
 class HistorialMaterialSerializer(serializers.ModelSerializer):

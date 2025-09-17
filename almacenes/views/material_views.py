@@ -230,84 +230,151 @@ class MaterialViewSet(viewsets.ModelViewSet):
 # En almacenes/views/material_views.py
 
 class ReingresoMaterialView(APIView):
-    """View para manejar reingresos de materiales"""
+    """View para manejar reingresos de materiales de reposición"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
 
     def post(self, request):
-        """Crear reingreso de material defectuoso"""
-        data = request.data
-
+        """Registrar reingreso de material de reposición (desde devolución)"""
         try:
-            # Material original defectuoso
-            material_original = Material.objects.get(id=data['material_original_id'])
+            material_original_id = request.data.get('material_original_id')
 
-            # Validar que esté defectuoso
-            if not material_original.estado_onu or material_original.estado_onu.codigo != 'DEFECTUOSO':
+            if not material_original_id:
                 return Response({
-                    'error': 'Solo se pueden reingresar materiales defectuosos'
-                }, status=400)
+                    'success': False,
+                    'error': 'ID del material original requerido'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Obtener material original
+            try:
+                material_original = Material.objects.get(id=material_original_id)
+            except Material.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': 'Material original no encontrado'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # Validar que el material esté devuelto al proveedor
+            try:
+                estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_PROVEEDOR', activo=True)
+                if material_original.estado_onu != estado_devuelto:
+                    return Response({
+                        'success': False,
+                        'error': 'El material original debe estar devuelto al proveedor'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            except EstadoMaterialONU.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': 'Estado DEVUELTO_PROVEEDOR no configurado'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # Validar unicidad de MAC y GPON
+            mac_address = request.data.get('mac_address', '').upper()
+            gpon_serial = request.data.get('gpon_serial', '')
+
+            if not mac_address or not gpon_serial:
+                return Response({
+                    'success': False,
+                    'error': 'MAC Address y GPON Serial son obligatorios'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if Material.objects.filter(mac_address=mac_address).exists():
+                return Response({
+                    'success': False,
+                    'error': f'MAC Address {mac_address} ya existe en el sistema'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if Material.objects.filter(gpon_serial=gpon_serial).exists():
+                return Response({
+                    'success': False,
+                    'error': f'GPON Serial {gpon_serial} ya existe en el sistema'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Obtener estados para el nuevo material
+            try:
+                estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+                tipo_reingreso = TipoIngreso.objects.get(codigo='REINGRESO', activo=True)
+            except (EstadoMaterialONU.DoesNotExist, TipoIngreso.DoesNotExist):
+                return Response({
+                    'success': False,
+                    'error': 'Estados o tipos no configurados correctamente'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             with transaction.atomic():
-                # Crear nuevo material de reingreso
+                # Crear nuevo material de reposición
                 nuevo_material = Material.objects.create(
-                    tipo_material=material_original.tipo_material,
-                    modelo=material_original.modelo,
+                    # Heredar datos del material original
                     lote=material_original.lote,
-
-                    # Datos del nuevo equipo
-                    mac_address=data['mac_address'],
-                    gpon_serial=data['gpon_serial'],
-                    serial_manufacturer=data['serial_manufacturer'],
-                    codigo_item_equipo=data['codigo_item_equipo'],
-
+                    modelo=material_original.modelo,
                     almacen_actual=material_original.almacen_actual,
+                    tipo_material=material_original.tipo_material,
+
+                    # Nuevos datos del equipo de reposición
+                    mac_address=mac_address,
+                    gpon_serial=gpon_serial,
+                    serial_manufacturer=request.data.get('serial_manufacturer', ''),
+                    codigo_item_equipo=request.data.get('codigo_item_equipo', ''),
+
+                    # Estados y control
+                    estado_onu=estado_disponible,
                     es_nuevo=False,  # Es reingreso
-                    tipo_origen=TipoIngreso.objects.get(codigo='REINGRESO'),
+                    tipo_origen=tipo_reingreso,
                     cantidad=1.00,
 
-                    # Referencias al original
+                    # Referencias y metadatos
                     equipo_original=material_original,
-                    motivo_reingreso=data.get('motivo_reingreso', 'Reposición por equipo defectuoso'),
+                    motivo_reingreso=request.data.get('motivo_reingreso', 'Reposición por equipo defectuoso'),
                     numero_entrega_parcial=material_original.numero_entrega_parcial,
-
-                    observaciones=f"Reingreso del equipo {material_original.codigo_interno}"
+                    observaciones=f"Reposición de {material_original.codigo_interno} - MAC: {mac_address}"
                 )
 
-                # Actualizar material original
-                material_original.observaciones += f"\nREEMPLAZADO POR: {nuevo_material.codigo_interno} - {timezone.now()}"
+                # Actualizar el material original con referencia al reemplazo
+                material_original.material_reemplazo = nuevo_material
+                material_original.observaciones += f"\n[REEMPLAZADO] Por: {nuevo_material.codigo_interno} - {timezone.now().strftime('%Y-%m-%d %H:%M')}"
                 material_original.save()
 
-                # Crear historial para ambos
+                # Crear entrada en historial para el nuevo material
                 HistorialMaterial.objects.create(
-                    material=material_original,
-                    estado_anterior=material_original.estado_display,
-                    estado_nuevo='Reemplazado',
-                    almacen_anterior=material_original.almacen_actual,
-                    almacen_nuevo=material_original.almacen_actual,
-                    motivo='Equipo reemplazado por reingreso',
-                    observaciones=f'Reemplazado por {nuevo_material.codigo_interno}',
+                    material=nuevo_material,
+                    estado_anterior='N/A',
+                    estado_nuevo='DISPONIBLE',
+                    almacen_anterior=None,
+                    almacen_nuevo=nuevo_material.almacen_actual,
+                    motivo=f'Reingreso por reposición de material defectuoso: {material_original.codigo_interno}',
+                    observaciones=request.data.get('motivo_reingreso', ''),
                     usuario_responsable=request.user
                 )
 
+                # Crear entrada en historial para el material original
                 HistorialMaterial.objects.create(
-                    material=nuevo_material,
-                    estado_anterior='',
-                    estado_nuevo=nuevo_material.estado_display,
-                    almacen_anterior=None,
-                    almacen_nuevo=nuevo_material.almacen_actual,
-                    motivo='Reingreso por reposición',
-                    observaciones=f'Reemplaza equipo defectuoso {material_original.codigo_interno}',
+                    material=material_original,
+                    estado_anterior='DEVUELTO_PROVEEDOR',
+                    estado_nuevo='REEMPLAZADO',
+                    almacen_anterior=material_original.almacen_actual,
+                    almacen_nuevo=material_original.almacen_actual,
+                    motivo=f'Material reemplazado por: {nuevo_material.codigo_interno}',
+                    observaciones=f'Reposición registrada - Nuevo MAC: {mac_address}',
                     usuario_responsable=request.user
                 )
 
             return Response({
                 'success': True,
-                'message': 'Reingreso registrado exitosamente',
-                'material_original': material_original.codigo_interno,
-                'material_nuevo': nuevo_material.codigo_interno
+                'message': 'Reingreso registrado correctamente',
+                'nuevo_material': {
+                    'id': nuevo_material.id,
+                    'codigo_interno': nuevo_material.codigo_interno,
+                    'mac_address': nuevo_material.mac_address,
+                    'gpon_serial': nuevo_material.gpon_serial,
+                    'lote': nuevo_material.lote.numero_lote if nuevo_material.lote else None
+                },
+                'material_original': {
+                    'id': material_original.id,
+                    'codigo_interno': material_original.codigo_interno,
+                    'estado': 'REEMPLAZADO'
+                }
             })
 
-        except Material.DoesNotExist:
-            return Response({'error': 'Material original no encontrado'}, status=404)
         except Exception as e:
-            return Response({'error': str(e)}, status=500)
+            return Response({
+                'success': False,
+                'error': f'Error interno: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
