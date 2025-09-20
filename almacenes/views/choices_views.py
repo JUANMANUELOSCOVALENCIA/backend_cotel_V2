@@ -476,6 +476,9 @@ class OpcionesCompletasView(APIView):
         cache_data['marcas'] = MarcaSerializer(
             Marca.objects.filter(activo=True).order_by('nombre'), many=True
         ).data
+        cache_data['sectores_solicitantes'] = SectorSolicitanteSerializer(
+            SectorSolicitante.objects.filter(activo=True).order_by('orden'), many=True
+        ).data
 
         # AGREGADO: Modelos con todas las relaciones
         cache_data['modelos'] = ModeloSerializer(

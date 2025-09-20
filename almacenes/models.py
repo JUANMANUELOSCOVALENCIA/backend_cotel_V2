@@ -251,6 +251,24 @@ class RespuestaProveedor(models.Model):
     def __str__(self):
         return self.nombre
 
+class SectorSolicitante(models.Model):
+    """Sectores que solicitan materiales/equipos - Versión simplificada"""
+    nombre = models.CharField(max_length=100, unique=True)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_sector_solicitante'
+        verbose_name = 'Sector Solicitante'
+        verbose_name_plural = 'Sectores Solicitantes'
+        ordering = ['orden', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
 
 # ========== MODELOS PRINCIPALES ==========
 
@@ -506,6 +524,12 @@ class Lote(models.Model):
         help_text="Almacén donde se reciben los materiales"
     )
     tipo_servicio = models.ForeignKey('contratos.TipoServicio', on_delete=models.CASCADE)
+    # Sector solicitante
+    sector_solicitante = models.ForeignKey(
+        SectorSolicitante,
+        on_delete=models.CASCADE,
+        help_text="Sector que solicita los materiales"
+    )
 
     # Códigos SPRINT
     codigo_requerimiento_compra = models.CharField(
@@ -1255,185 +1279,3 @@ class InspeccionLaboratorio(models.Model):
 
     def __str__(self):
         return f"{self.numero_informe} - {self.material.codigo_interno}"
-
-# ========== FUNCIÓN PARA CREAR DATOS INICIALES ==========
-
-def crear_datos_iniciales():
-    """Función para crear todos los datos iniciales del sistema"""
-
-    # 1. Unidades de Medida
-    unidades = [
-        ('PIEZA', 'Pieza', 'pza'),
-        ('UNIDAD', 'Unidad', 'und'),
-        ('METROS', 'Metros', 'm'),
-        ('CAJA', 'Caja', 'cja'),
-        ('ROLLO', 'Rollo', 'rll'),
-        ('KIT', 'Kit', 'kit'),
-        ('PAQUETE', 'Paquete', 'pqt'),
-    ]
-
-    for codigo, nombre, simbolo in unidades:
-        UnidadMedida.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'simbolo': simbolo, 'orden': len(unidades)}
-        )
-
-    # 2. Tipos de Ingreso
-    tipos_ingreso = [
-        ('NUEVO', 'Nuevo', 'Ingreso de materiales nuevos'),
-        ('REINGRESO', 'Reingreso', 'Reingreso de materiales devueltos'),
-        ('DEVOLUCION', 'Devolución', 'Devolución de materiales de campo'),
-        ('LABORATORIO', 'Laboratorio', 'Materiales provenientes de laboratorio'),
-    ]
-
-    for i, (codigo, nombre, desc) in enumerate(tipos_ingreso):
-        TipoIngreso.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'descripcion': desc, 'orden': i}
-        )
-
-    # 3. Estados de Lote
-    estados_lote = [
-        ('REGISTRADO', 'Registrado', '#9CA3AF', False),
-        ('PENDIENTE_RECEPCION', 'Pendiente Recepción', '#F59E0B', False),
-        ('RECEPCION_PARCIAL', 'Recepción Parcial', '#3B82F6', False),
-        ('RECEPCION_COMPLETA', 'Recepción Completa', '#10B981', False),
-        ('ACTIVO', 'Activo', '#059669', False),
-        ('CERRADO', 'Cerrado', '#6B7280', True),
-    ]
-
-    for i, (codigo, nombre, color, es_final) in enumerate(estados_lote):
-        EstadoLote.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
-        )
-
-    # 4. Estados de Traspaso
-    estados_traspaso = [
-        ('PENDIENTE', 'Pendiente', '#F59E0B', False),
-        ('EN_TRANSITO', 'En Tránsito', '#3B82F6', False),
-        ('RECIBIDO', 'Recibido', '#10B981', True),
-        ('CANCELADO', 'Cancelado', '#EF4444', True),
-    ]
-
-    for i, (codigo, nombre, color, es_final) in enumerate(estados_traspaso):
-        EstadoTraspaso.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
-        )
-
-    # 5. Estados de Material ONU
-    estados_onu = [
-        ('NUEVO', 'Nuevo', '#9CA3AF', False, False),
-        ('DISPONIBLE', 'Disponible', '#10B981', True, True),
-        ('RESERVADO', 'Reservado', '#F59E0B', False, True),
-        ('ASIGNADO', 'Asignado', '#3B82F6', False, False),
-        ('INSTALADO', 'Instalado', '#8B5CF6', False, False),
-        ('EN_LABORATORIO', 'En Laboratorio', '#F97316', False, False),
-        ('DEFECTUOSO', 'Defectuoso', '#EF4444', False, False),
-        ('DEVUELTO_PROVEEDOR', 'Devuelto a Proveedor', '#6B7280', False, False),
-        ('REINGRESADO', 'Reingresado', '#06B6D4', True, True),
-        ('DADO_DE_BAJA', 'Dado de Baja', '#374151', False, False),
-    ]
-
-    for i, (codigo, nombre, color, permite_asig, permite_tras) in enumerate(estados_onu):
-        EstadoMaterialONU.objects.get_or_create(
-            codigo=codigo,
-            defaults={
-                'nombre': nombre,
-                'color': color,
-                'permite_asignacion': permite_asig,
-                'permite_traspaso': permite_tras,
-                'orden': i
-            }
-        )
-
-    # 6. Estados de Material General
-    estados_general = [
-        ('DISPONIBLE', 'Disponible', '#10B981', True, True),
-        ('RESERVADO', 'Reservado', '#F59E0B', False, True),
-        ('ASIGNADO', 'Asignado', '#3B82F6', False, False),
-        ('CONSUMIDO', 'Consumido', '#6B7280', False, False),
-        ('DEFECTUOSO', 'Defectuoso', '#EF4444', False, False),
-        ('DADO_DE_BAJA', 'Dado de Baja', '#374151', False, False),
-    ]
-
-    for i, (codigo, nombre, color, permite_cons, permite_tras) in enumerate(estados_general):
-        EstadoMaterialGeneral.objects.get_or_create(
-            codigo=codigo,
-            defaults={
-                'nombre': nombre,
-                'color': color,
-                'permite_consumo': permite_cons,
-                'permite_traspaso': permite_tras,
-                'orden': i
-            }
-        )
-
-    # 7. Tipos de Almacén
-    tipos_almacen = [
-        ('PRINCIPAL', 'Principal'),
-        ('REGIONAL', 'Regional'),
-        ('TEMPORAL', 'Temporal'),
-    ]
-
-    for i, (codigo, nombre) in enumerate(tipos_almacen):
-        TipoAlmacen.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'orden': i}
-        )
-
-    # 8. Estados de Devolución
-    estados_devolucion = [
-        ('PENDIENTE', 'Pendiente', '#F59E0B', False),
-        ('ENVIADO', 'Enviado', '#3B82F6', False),
-        ('CONFIRMADO', 'Confirmado', '#10B981', True),
-        ('RECHAZADO', 'Rechazado', '#EF4444', True),
-    ]
-
-    for i, (codigo, nombre, color, es_final) in enumerate(estados_devolucion):
-        EstadoDevolucion.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'color': color, 'es_final': es_final, 'orden': i}
-        )
-
-    # 9. Respuestas de Proveedor
-    respuestas = [
-        ('REPOSICION', 'Reposición'),
-        ('CREDITO', 'Crédito'),
-        ('RECHAZO', 'Rechazo'),
-        ('PENDIENTE', 'Pendiente'),
-    ]
-
-    for i, (codigo, nombre) in enumerate(respuestas):
-        RespuestaProveedor.objects.get_or_create(
-            codigo=codigo,
-            defaults={'nombre': nombre, 'orden': i}
-        )
-
-    # 10. Tipos de Material
-    unidad_pieza = UnidadMedida.objects.get(codigo='PIEZA')
-    unidad_metros = UnidadMedida.objects.get(codigo='METROS')
-
-    tipos_material = [
-        ('ONU', 'Equipo ONU', 'Equipos de red de fibra óptica (ONUs)', unidad_pieza, True, True),
-        ('CABLE_DROP', 'Cable Drop', 'Cable de fibra óptica para conexión domiciliaria', unidad_metros, False, False),
-        ('CONECTOR_APC', 'Conector APC', 'Conectores ópticos tipo APC', unidad_pieza, False, False),
-        ('CONECTOR_UPC', 'Conector UPC', 'Conectores ópticos tipo UPC', unidad_pieza, False, False),
-        ('ROSETA_OPTICA', 'Roseta Óptica', 'Rosetas para instalación óptica domiciliaria', unidad_pieza, False, False),
-        ('PATCH_CORE', 'Patch Core', 'Cables patch para core de red', unidad_pieza, False, False),
-        ('TRIPLEXOR', 'Triplexor', 'Dispositivos triplexores para red óptica', unidad_pieza, False, False),
-    ]
-
-    for i, (codigo, nombre, desc, unidad, inspeccion, es_unico) in enumerate(tipos_material):
-        TipoMaterial.objects.get_or_create(
-            codigo=codigo,
-            defaults={
-                'nombre': nombre,
-                'descripcion': desc,
-                'unidad_medida_default': unidad,
-                'requiere_inspeccion_inicial': inspeccion,
-                'es_unico': es_unico,
-                'orden': i
-            }
-        )

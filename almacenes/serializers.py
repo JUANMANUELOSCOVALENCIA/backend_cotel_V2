@@ -33,7 +33,7 @@ from .models import (
     # Modelos de operaciones
     TraspasoAlmacen, TraspasoMaterial,
     DevolucionProveedor, DevolucionMaterial,
-    HistorialMaterial, InspeccionLaboratorio,
+    HistorialMaterial, InspeccionLaboratorio, SectorSolicitante,
 )
 
 
@@ -420,6 +420,7 @@ class LoteSerializer(serializers.ModelSerializer):
     cantidad_recibida = serializers.ReadOnlyField()
     cantidad_pendiente = serializers.ReadOnlyField()
     porcentaje_recibido = serializers.ReadOnlyField()
+    sector_solicitante_info = serializers.SerializerMethodField()
 
     # Auditoría
     created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
@@ -438,7 +439,7 @@ class LoteSerializer(serializers.ModelSerializer):
             'total_entregas_parciales', 'observaciones',
             'detalles', 'entregas_parciales',
             'cantidad_total', 'cantidad_recibida', 'cantidad_pendiente', 'porcentaje_recibido',
-            'created_at', 'updated_at', 'created_by', 'created_by_nombre'
+            'created_at', 'updated_at', 'created_by', 'created_by_nombre','sector_solicitante','sector_solicitante_info'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
@@ -477,6 +478,14 @@ class LoteSerializer(serializers.ModelSerializer):
             'color': obj.estado.color,
             'es_final': obj.estado.es_final
         }
+
+    def get_sector_solicitante_info(self, obj):
+        if obj.sector_solicitante:
+            return {
+                'id': obj.sector_solicitante.id,
+                'nombre': obj.sector_solicitante.nombre
+            }
+        return None
 
 
 class LoteCreateSerializer(serializers.ModelSerializer):
@@ -1749,3 +1758,192 @@ class ReingresoMaterialSerializer(serializers.Serializer):
     serial_manufacturer = serializers.CharField(max_length=100)
     codigo_item_equipo = serializers.CharField(max_length=10)
     motivo_reingreso = serializers.CharField(required=False)
+
+
+# ========== SERIALIZER SIMPLIFICADO PARA SECTORES SOLICITANTES ==========
+
+class SectorSolicitanteSerializer(serializers.ModelSerializer):
+    materiales_count = serializers.SerializerMethodField()
+    lotes_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SectorSolicitante
+        fields = [
+            'id', 'nombre', 'activo', 'orden',
+            'materiales_count', 'lotes_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_materiales_count(self, obj):
+        return Material.objects.filter(lote__sector_solicitante=obj).count()
+
+    def get_lotes_count(self, obj):
+        return obj.lote_set.count()
+
+    def validate_nombre(self, value):
+        """Validar que el nombre sea único"""
+        instance = getattr(self, 'instance', None)
+        if SectorSolicitante.objects.filter(nombre=value).exclude(
+                id=instance.id if instance else None
+        ).exists():
+            raise serializers.ValidationError(f"Ya existe un sector con nombre: {value}")
+        return value
+
+
+# ========== SERIALIZER PARA DEVOLUCIÓN A SECTOR ==========
+
+class DevolucionSectorSerializer(serializers.Serializer):
+    """Devolver materiales defectuosos al sector solicitante"""
+
+    materiales_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        help_text="IDs de los materiales defectuosos a devolver"
+    )
+    motivo = serializers.CharField(max_length=500)
+
+    def validate_materiales_ids(self, value):
+        if not value:
+            raise serializers.ValidationError("Debe seleccionar al menos un material")
+
+        # Verificar que estén defectuosos
+        estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+        materiales = Material.objects.filter(id__in=value)
+
+        for material in materiales:
+            if material.estado_onu != estado_defectuoso:
+                raise serializers.ValidationError(
+                    f"Material {material.codigo_interno} debe estar DEFECTUOSO"
+                )
+
+        return value
+
+    def ejecutar(self, user):
+        """Cambiar estado a DEVUELTO_SECTOR_SOLICITANTE"""
+        estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_SECTOR_SOLICITANTE', activo=True)
+        materiales = Material.objects.filter(id__in=self.validated_data['materiales_ids'])
+        motivo = self.validated_data['motivo']
+
+        with transaction.atomic():
+            for material in materiales:
+                material.estado_onu = estado_devuelto
+                material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.now().date()} - {motivo}"
+                material.save()
+
+                # Historial
+                HistorialMaterial.objects.create(
+                    material=material,
+                    estado_anterior='DEFECTUOSO',
+                    estado_nuevo='DEVUELTO_SECTOR_SOLICITANTE',
+                    almacen_anterior=material.almacen_actual,
+                    almacen_nuevo=material.almacen_actual,
+                    motivo=f'Devuelto a sector: {material.lote.sector_solicitante.nombre}',
+                    observaciones=motivo,
+                    usuario_responsable=user
+                )
+
+        return len(materiales)
+
+
+# ========== SERIALIZER PARA REINGRESO DESDE SECTOR ==========
+
+class ReingresoSectorSerializer(serializers.Serializer):
+    """Reingresar nuevos equipos desde sector solicitante"""
+
+    materiales_originales_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        help_text="IDs de materiales devueltos al sector"
+    )
+    nuevos_equipos = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="Nuevos equipos: [{mac_address, gpon_serial, serial_manufacturer, codigo_item_equipo}]"
+    )
+
+    def validate_materiales_originales_ids(self, value):
+        estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_SECTOR_SOLICITANTE', activo=True)
+        materiales = Material.objects.filter(id__in=value)
+
+        for material in materiales:
+            if material.estado_onu != estado_devuelto:
+                raise serializers.ValidationError(
+                    f"Material {material.codigo_interno} debe estar DEVUELTO_SECTOR_SOLICITANTE"
+                )
+
+        return value
+
+    def validate_nuevos_equipos(self, value):
+        for i, equipo in enumerate(value):
+            # Validar campos requeridos
+            if not equipo.get('mac_address'):
+                raise serializers.ValidationError(f"Equipo {i + 1}: MAC requerido")
+            if not equipo.get('gpon_serial'):
+                raise serializers.ValidationError(f"Equipo {i + 1}: GPON requerido")
+            if not equipo.get('codigo_item_equipo'):
+                raise serializers.ValidationError(f"Equipo {i + 1}: Item Equipo requerido")
+
+            # Validar formatos
+            mac = equipo['mac_address'].upper().replace('-', ':')
+            if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', mac):
+                raise serializers.ValidationError(f"Equipo {i + 1}: MAC inválido")
+
+            # Verificar unicidad
+            if Material.objects.filter(mac_address=mac).exists():
+                raise serializers.ValidationError(f"MAC {mac} ya existe")
+
+        return value
+
+    def ejecutar(self, user):
+        """Crear nuevos materiales de reingreso"""
+        estado_reingreso = EstadoMaterialONU.objects.get(codigo='REINGRESO_SECTOR', activo=True)
+        tipo_reingreso = TipoIngreso.objects.get(codigo='REINGRESO', activo=True)
+        tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+
+        materiales_originales = Material.objects.filter(
+            id__in=self.validated_data['materiales_originales_ids']
+        )
+        nuevos_equipos = self.validated_data['nuevos_equipos']
+
+        materiales_creados = []
+
+        with transaction.atomic():
+            for i, material_original in enumerate(materiales_originales):
+                equipo = nuevos_equipos[i]
+
+                # Crear nuevo material
+                nuevo_material = Material.objects.create(
+                    tipo_material=tipo_onu,
+                    modelo=material_original.modelo,
+                    lote=material_original.lote,
+                    mac_address=equipo['mac_address'].upper().replace('-', ':'),
+                    gpon_serial=equipo['gpon_serial'],
+                    serial_manufacturer=equipo.get('serial_manufacturer', '') or None,
+                    codigo_item_equipo=equipo['codigo_item_equipo'],
+                    almacen_actual=material_original.almacen_actual,
+                    estado_onu=estado_reingreso,
+                    es_nuevo=False,
+                    tipo_origen=tipo_reingreso,
+                    cantidad=1.00,
+                    equipo_original=material_original,
+                    numero_entrega_parcial=material_original.numero_entrega_parcial,
+                    observaciones=f"Reingreso desde {material_original.lote.sector_solicitante.nombre}"
+                )
+
+                # Actualizar material original
+                material_original.material_reemplazo = nuevo_material
+                material_original.save()
+
+                # Historial
+                HistorialMaterial.objects.create(
+                    material=nuevo_material,
+                    estado_anterior='N/A',
+                    estado_nuevo='REINGRESO_SECTOR',
+                    almacen_anterior=None,
+                    almacen_nuevo=nuevo_material.almacen_actual,
+                    motivo=f'Reingreso desde {material_original.lote.sector_solicitante.nombre}',
+                    observaciones=f'Reemplaza {material_original.codigo_interno}',
+                    usuario_responsable=user
+                )
+
+                materiales_creados.append(nuevo_material)
+
+        return materiales_creados
