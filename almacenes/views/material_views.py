@@ -232,6 +232,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
 class ReingresoMaterialView(APIView):
     """View para manejar reingresos de materiales de reposición"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
+    basename = 'materiales'
 
     def post(self, request):
         """Registrar reingreso de material de reposición (desde devolución)"""

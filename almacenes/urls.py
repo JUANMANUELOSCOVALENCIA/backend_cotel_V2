@@ -84,14 +84,13 @@ router.register(r'estados-devolucion', EstadoDevolucionViewSet, basename='estado
 router.register(r'respuestas-proveedor', RespuestaProveedorViewSet, basename='respuestas-proveedor')
 router.register(r'modelo-componentes', ModeloComponenteViewSet, basename='modelo-componentes')
 
-
 # ========== URLS PRINCIPALES ==========
 
 urlpatterns = [
-    # ===== ENDPOINTS DE VIEWSETS (AUTO-GENERADOS) =====
-    path('', include(router.urls)),
+    # ===== ENDPOINTS ESPECIALES PRIMERO (ANTES DEL ROUTER) =====
 
-    # ===== ENDPOINTS ESPECIALES (VIEWS INDIVIDUALES) =====
+    # --- REINGRESO DE MATERIALES (CRÍTICO: DEBE IR ANTES DEL ROUTER) ---
+    path('materiales/reingreso/', ReingresoMaterialView.as_view(), name='reingreso-material'),
 
     # --- IMPORTACIÓN MASIVA ---
     path('importacion/masiva/', ImportacionMasivaView.as_view(), name='importacion-masiva'),
@@ -100,6 +99,7 @@ urlpatterns = [
     path('laboratorio/', LaboratorioView.as_view(), name='laboratorio-dashboard'),
     path('laboratorio/masivo/', LaboratorioMasivoView.as_view(), name='laboratorio-masivo'),
     path('laboratorio/consultas/', LaboratorioConsultaView.as_view(), name='laboratorio-consultas'),
+    path('laboratorio/inspeccion/', InspeccionLaboratorioView.as_view(), name='inspeccion-laboratorio'),
 
     # --- REPORTES Y ESTADÍSTICAS ---
     path('estadisticas/', EstadisticasGeneralesView.as_view(), name='estadisticas-generales'),
@@ -114,8 +114,7 @@ urlpatterns = [
     # --- CONFIGURACIÓN Y DATOS ---
     path('opciones-completas/', OpcionesCompletasView.as_view(), name='opciones-completas'),
     path('inicializar-datos/', InicializarDatosView.as_view(), name='inicializar-datos'),
-    path('laboratorio/inspeccion/', InspeccionLaboratorioView.as_view(), name='inspeccion-laboratorio'),
-    path('materiales/reingreso/', ReingresoMaterialView.as_view(), name='reingreso-material'),
-    # QUITAR ESTA LÍNEA REDUNDANTE:
-    # path('materiales/', include(router.urls)),
+
+    # ===== ENDPOINTS DE VIEWSETS (AUTO-GENERADOS) AL FINAL =====
+    path('', include(router.urls)),
 ]

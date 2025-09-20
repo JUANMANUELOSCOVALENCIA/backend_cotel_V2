@@ -1137,12 +1137,18 @@ class ImportacionMasivaView(APIView):
 
                             siguiente_numero = (ultima_entrega.numero_entrega + 1) if ultima_entrega else 1
 
+                            try:
+                                estado_activo = EstadoLote.objects.get(codigo='ACTIVO', activo=True)
+                            except EstadoLote.DoesNotExist:
+                                # Usar el primer estado disponible como fallback
+                                estado_activo = EstadoLote.objects.filter(activo=True).first()
                             # Crear nueva entrega parcial
                             nueva_entrega = EntregaParcialLote.objects.create(
                                 lote=lote,
                                 numero_entrega=siguiente_numero,
                                 cantidad_entregada=importados,
                                 fecha_entrega=timezone.now().date(),
+                                estado_entrega=estado_activo,
                                 observaciones=f"Entrega automática - Importados {importados} equipos"
                             )
 
