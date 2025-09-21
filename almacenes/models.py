@@ -207,50 +207,6 @@ class TipoAlmacen(models.Model):
     def __str__(self):
         return self.nombre
 
-
-class EstadoDevolucion(models.Model):
-    """Estados de devoluciones a proveedores"""
-    codigo = models.CharField(max_length=20, unique=True)
-    nombre = models.CharField(max_length=50)
-    descripcion = models.TextField(blank=True)
-    color = models.CharField(max_length=7, default='#6B7280')
-    es_final = models.BooleanField(default=False)
-    activo = models.BooleanField(default=True)
-    orden = models.PositiveIntegerField(default=0)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'almacenes_estado_devolucion'
-        verbose_name = 'Estado de Devolución'
-        verbose_name_plural = 'Estados de Devolución'
-        ordering = ['orden', 'nombre']
-
-    def __str__(self):
-        return self.nombre
-
-
-class RespuestaProveedor(models.Model):
-    """Respuestas de proveedores a devoluciones"""
-    codigo = models.CharField(max_length=20, unique=True)
-    nombre = models.CharField(max_length=50)
-    descripcion = models.TextField(blank=True)
-    activo = models.BooleanField(default=True)
-    orden = models.PositiveIntegerField(default=0)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'almacenes_respuesta_proveedor'
-        verbose_name = 'Respuesta de Proveedor'
-        verbose_name_plural = 'Respuestas de Proveedor'
-        ordering = ['orden', 'nombre']
-
-    def __str__(self):
-        return self.nombre
-
 class SectorSolicitante(models.Model):
     """Sectores que solicitan materiales/equipos - Versión simplificada"""
     nombre = models.CharField(max_length=100, unique=True)
@@ -1079,104 +1035,6 @@ class TraspasoMaterial(models.Model):
     def __str__(self):
         return f"{self.traspaso.numero_traspaso} - {self.material.codigo_interno}"
 
-
-# ========== MODELO DE DEVOLUCIONES AL PROVEEDOR ==========
-
-class DevolucionProveedor(models.Model):
-    """Modelo para devoluciones al proveedor"""
-
-    numero_devolucion = models.CharField(max_length=20, unique=True, help_text="Número único de devolución")
-    lote_origen = models.ForeignKey(Lote, on_delete=models.CASCADE, help_text="Lote de donde provienen los materiales")
-    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
-
-    # Información de la devolución
-    motivo = models.TextField(help_text="Motivo de la devolución basado en informe de laboratorio")
-    numero_informe_laboratorio = models.CharField(max_length=50,
-                                                  help_text="Número de informe de laboratorio que justifica la devolución")
-
-    # Estado de la devolución
-    estado = models.ForeignKey(
-        EstadoDevolucion,
-        on_delete=models.CASCADE,
-        help_text="Estado actual de la devolución"
-    )
-
-    # Fechas
-    fecha_creacion = models.DateTimeField(auto_now_add=True)
-    fecha_envio = models.DateTimeField(null=True, blank=True)
-    fecha_confirmacion = models.DateTimeField(null=True, blank=True)
-
-    # Respuesta del proveedor
-    respuesta_proveedor = models.ForeignKey(
-        RespuestaProveedor,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        help_text="Respuesta del proveedor a la devolución"
-    )
-    observaciones_proveedor = models.TextField(blank=True)
-
-    # Auditoría
-    created_by = models.ForeignKey(
-        'usuarios.Usuario',
-        on_delete=models.CASCADE,
-        related_name='devoluciones_creadas'
-    )
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'almacenes_devolucion_proveedor'
-        verbose_name = 'Devolución a Proveedor'
-        verbose_name_plural = 'Devoluciones a Proveedores'
-
-    def __str__(self):
-        return f"{self.numero_devolucion} - {self.proveedor.nombre_comercial}"
-
-    def save(self, *args, **kwargs):
-        if not self.numero_devolucion:
-            self.numero_devolucion = self._generar_numero_devolucion()
-
-        # Asignar estado inicial si no tiene
-        if not self.estado_id:
-            try:
-                estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
-                self.estado = estado_pendiente
-            except EstadoDevolucion.DoesNotExist:
-                pass
-
-        super().save(*args, **kwargs)
-
-    def _generar_numero_devolucion(self):
-        """Generar número de devolución único"""
-        import uuid
-        while True:
-            numero = f"DEV-{timezone.now().year}-{str(uuid.uuid4().int)[:6]}"
-            if not DevolucionProveedor.objects.filter(numero_devolucion=numero).exists():
-                return numero
-
-    @property
-    def cantidad_materiales(self):
-        return self.materiales_devueltos.count()
-
-
-class DevolucionMaterial(models.Model):
-    """Materiales específicos incluidos en una devolución"""
-    devolucion = models.ForeignKey(
-        DevolucionProveedor,
-        on_delete=models.CASCADE,
-        related_name='materiales_devueltos'
-    )
-    material = models.ForeignKey(Material, on_delete=models.CASCADE)
-    motivo_especifico = models.TextField(blank=True, help_text="Motivo específico para este material")
-
-    class Meta:
-        db_table = 'almacenes_devolucion_material'
-        unique_together = ['devolucion', 'material']
-
-    def __str__(self):
-        return f"{self.devolucion.numero_devolucion} - {self.material.codigo_interno}"
-
-
 # ========== MODELO DE HISTORIAL ==========
 
 class HistorialMaterial(models.Model):
@@ -1209,12 +1067,6 @@ class HistorialMaterial(models.Model):
     # Referencias a otros modelos si aplica
     traspaso_relacionado = models.ForeignKey(
         TraspasoAlmacen,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True
-    )
-    devolucion_relacionada = models.ForeignKey(
-        DevolucionProveedor,
         on_delete=models.SET_NULL,
         null=True,
         blank=True

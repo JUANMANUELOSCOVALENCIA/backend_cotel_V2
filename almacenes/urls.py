@@ -14,7 +14,7 @@ from .views import (
     LoteViewSet, LoteDetalleViewSet, ImportacionMasivaView,
 
     # Views de operaciones
-    TraspasoAlmacenViewSet, DevolucionProveedorViewSet,
+    TraspasoAlmacenViewSet,
 
     # Views de laboratorio
     LaboratorioView, LaboratorioMasivoView, LaboratorioConsultaView,
@@ -35,8 +35,6 @@ from .views import (
     EstadoMaterialONUViewSet,
     EstadoMaterialGeneralViewSet,
     TipoAlmacenViewSet,
-    EstadoDevolucionViewSet,
-    RespuestaProveedorViewSet,
     OpcionesCompletasView,
     InicializarDatosView,
 )
@@ -65,7 +63,6 @@ router.register(r'materiales', MaterialViewSet, basename='materiales')
 
 # Views de operaciones
 router.register(r'traspasos', TraspasoAlmacenViewSet, basename='traspasos')
-router.register(r'devoluciones', DevolucionProveedorViewSet, basename='devoluciones')
 
 # Views de modelos básicos actualizados
 router.register(r'marcas', MarcaViewSet, basename='marcas')
@@ -81,8 +78,6 @@ router.register(r'unidades-medida', UnidadMedidaViewSet, basename='unidades-medi
 router.register(r'estados-material-onu', EstadoMaterialONUViewSet, basename='estados-material-onu')
 router.register(r'estados-material-general', EstadoMaterialGeneralViewSet, basename='estados-material-general')
 router.register(r'tipos-almacen', TipoAlmacenViewSet, basename='tipos-almacen')
-router.register(r'estados-devolucion', EstadoDevolucionViewSet, basename='estados-devolucion')
-router.register(r'respuestas-proveedor', RespuestaProveedorViewSet, basename='respuestas-proveedor')
 router.register(r'modelo-componentes', ModeloComponenteViewSet, basename='modelo-componentes')
 router.register(r'sectores-solicitantes', SectorSolicitanteViewSet, basename='sectores-solicitantes')
 

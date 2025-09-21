@@ -13,9 +13,9 @@ import json
 
 from usuarios.permissions import GenericRolePermission
 from ..models import (
-    Almacen, Proveedor, Lote, Material, TraspasoAlmacen, DevolucionProveedor,
+    Almacen, Proveedor, Lote, Material, TraspasoAlmacen,
     TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral,
-    EstadoLote, EstadoTraspaso, EstadoDevolucion
+    EstadoLote, EstadoTraspaso,
 )
 # EstadisticasGeneralesSerializer se usa solo para documentación
 # Las estadísticas se construyen directamente en las views
@@ -50,9 +50,6 @@ class EstadisticasGeneralesView(APIView):
             estado__codigo__in=['PENDIENTE', 'EN_TRANSITO']
         ).count()
 
-        devoluciones_pendientes = DevolucionProveedor.objects.filter(
-            estado__codigo__in=['PENDIENTE', 'ENVIADO']
-        ).count()
 
         # ===== MATERIALES EN LABORATORIO =====
         # Obtener tipo de material ONU
@@ -144,7 +141,6 @@ class EstadisticasGeneralesView(APIView):
             },
             'operaciones_activas': {
                 'traspasos_pendientes': traspasos_pendientes,
-                'devoluciones_pendientes': devoluciones_pendientes,
                 'materiales_en_laboratorio': materiales_laboratorio
             },
             'por_almacen': almacenes_stats,
@@ -152,7 +148,6 @@ class EstadisticasGeneralesView(APIView):
             'alertas': {
                 'materiales_proximos_vencer': proximos_vencer,
                 'traspasos_pendientes': traspasos_pendientes > 0,
-                'devoluciones_sin_respuesta': devoluciones_pendientes > 0,
                 'materiales_laboratorio_excesivo': materiales_laboratorio > 50
             }
         }
@@ -225,7 +220,6 @@ class DashboardView(APIView):
             estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
             estado_en_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
             estado_en_transito = EstadoTraspaso.objects.get(codigo='EN_TRANSITO', activo=True)
-            estado_pendiente_dev = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
 
             tareas_pendientes = {
                 'materiales_nuevos_sin_inspeccionar': Material.objects.filter(
@@ -238,10 +232,6 @@ class DashboardView(APIView):
                     estado=estado_en_transito
                 ).count(),
 
-                'devoluciones_por_enviar': DevolucionProveedor.objects.filter(
-                    estado=estado_pendiente_dev
-                ).count(),
-
                 'materiales_laboratorio_mas_15_dias': Material.objects.filter(
                     tipo_material=tipo_onu,
                     estado_onu=estado_en_laboratorio,
@@ -249,11 +239,10 @@ class DashboardView(APIView):
                 ).count()
             }
         except (TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist,
-                EstadoTraspaso.DoesNotExist, EstadoDevolucion.DoesNotExist):
+                EstadoTraspaso.DoesNotExist):
             tareas_pendientes = {
                 'materiales_nuevos_sin_inspeccionar': 0,
                 'traspasos_por_confirmar': 0,
-                'devoluciones_por_enviar': 0,
                 'materiales_laboratorio_mas_15_dias': 0
             }
 
@@ -449,32 +438,11 @@ class ReporteMovimientosView(APIView):
                     'motivo': traspaso.motivo
                 })
 
-        # ===== DEVOLUCIONES =====
-        if not tipo_movimiento or tipo_movimiento == 'devolucion':
-            devoluciones = DevolucionProveedor.objects.filter(
-                fecha_creacion__date__gte=fecha_desde,
-                fecha_creacion__date__lte=fecha_hasta
-            )
-
-            for devolucion in devoluciones:
-                movimientos.append({
-                    'tipo': 'DEVOLUCION',
-                    'id': devolucion.id,
-                    'numero': devolucion.numero_devolucion,
-                    'fecha': devolucion.fecha_creacion.date(),
-                    'origen': devolucion.lote_origen.almacen_destino.nombre,
-                    'destino': devolucion.proveedor.nombre_comercial,
-                    'cantidad': devolucion.cantidad_materiales,
-                    'estado': devolucion.estado.nombre if devolucion.estado else 'Sin estado',
-                    'motivo': devolucion.motivo[:100] + '...' if len(devolucion.motivo) > 100 else devolucion.motivo
-                })
-
         # Ordenar por fecha
         movimientos.sort(key=lambda x: x['fecha'], reverse=True)
 
         # Estadísticas del período
         total_traspasos = len([m for m in movimientos if m['tipo'] == 'TRASPASO'])
-        total_devoluciones = len([m for m in movimientos if m['tipo'] == 'DEVOLUCION'])
         total_materiales_movidos = sum(m['cantidad'] for m in movimientos)
 
         return Response({
@@ -485,7 +453,6 @@ class ReporteMovimientosView(APIView):
             'resumen': {
                 'total_movimientos': len(movimientos),
                 'total_traspasos': total_traspasos,
-                'total_devoluciones': total_devoluciones,
                 'total_materiales_movidos': total_materiales_movidos
             },
             'movimientos': movimientos

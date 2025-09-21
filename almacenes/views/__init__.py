@@ -24,7 +24,6 @@ from .material_views import (
 # Views de operaciones
 from .operacion_views import (
     TraspasoAlmacenViewSet,
-    DevolucionProveedorViewSet
 )
 
 # Views de laboratorio
@@ -61,8 +60,6 @@ from .choices_views import (
     EstadoMaterialONUViewSet,
     EstadoMaterialGeneralViewSet,
     TipoAlmacenViewSet,
-    EstadoDevolucionViewSet,
-    RespuestaProveedorViewSet,
     OpcionesCompletasView,
     InicializarDatosView
 )
@@ -83,7 +80,6 @@ __all__ = [
 
     # Views de operaciones
     'TraspasoAlmacenViewSet',
-    'DevolucionProveedorViewSet',
 
     # Views de laboratorio
     'LaboratorioView',
@@ -112,8 +108,6 @@ __all__ = [
     'EstadoMaterialONUViewSet',
     'EstadoMaterialGeneralViewSet',
     'TipoAlmacenViewSet',
-    'EstadoDevolucionViewSet',
-    'RespuestaProveedorViewSet',
     'OpcionesCompletasView',
     'InicializarDatosView',
 ]

@@ -226,6 +226,129 @@ class MaterialViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'])
+    def defectuosos(self, request):
+        """Obtener equipos defectuosos para devolver al sector"""
+        try:
+            estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+
+            materiales = self.get_queryset().filter(
+                tipo_material=tipo_onu,
+                estado_onu=estado_defectuoso
+            ).select_related(
+                'lote__sector_solicitante', 'modelo__marca', 'almacen_actual'
+            )
+
+            # Filtro opcional por sector
+            sector_id = request.query_params.get('sector_id')
+            if sector_id:
+                materiales = materiales.filter(lote__sector_solicitante_id=sector_id)
+
+            serializer = MaterialListSerializer(materiales, many=True)
+            return Response({
+                'total': materiales.count(),
+                'materiales': serializer.data,
+                'estado_filtrado': 'DEFECTUOSO'
+            })
+
+        except (EstadoMaterialONU.DoesNotExist, TipoMaterial.DoesNotExist):
+            return Response({'error': 'Estados no configurados correctamente'}, status=500)
+
+    @action(detail=False, methods=['post'])
+    def devolver_a_sector(self, request):
+        """Cambiar equipos defectuosos a DEVUELTO_SECTOR_SOLICITANTE"""
+        materiales_ids = request.data.get('materiales_ids', [])
+        motivo = request.data.get('motivo', 'Devuelto al sector solicitante para gestión de reposición')
+
+        if not materiales_ids:
+            return Response({'error': 'IDs de materiales requeridos'}, status=400)
+
+        try:
+            estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+            estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_SECTOR_SOLICITANTE', activo=True)
+
+            # Verificar que todos los materiales estén defectuosos
+            materiales = Material.objects.filter(
+                id__in=materiales_ids,
+                estado_onu=estado_defectuoso,
+                tipo_material__es_unico=True
+            )
+
+            if materiales.count() != len(materiales_ids):
+                return Response({
+                    'error': 'Algunos materiales no están en estado DEFECTUOSO o no existen'
+                }, status=400)
+
+            with transaction.atomic():
+                count = 0
+                sectores_afectados = set()
+
+                for material in materiales:
+                    # Cambiar estado
+                    material.estado_onu = estado_devuelto
+                    material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.now().date()} - {motivo}"
+                    material.save()
+
+                    # Registrar sector afectado
+                    if material.lote.sector_solicitante:
+                        sectores_afectados.add(material.lote.sector_solicitante.nombre)
+
+                    # Crear historial
+                    HistorialMaterial.objects.create(
+                        material=material,
+                        estado_anterior='DEFECTUOSO',
+                        estado_nuevo='DEVUELTO_SECTOR_SOLICITANTE',
+                        almacen_anterior=material.almacen_actual,
+                        almacen_nuevo=material.almacen_actual,
+                        motivo=f'Devuelto a sector: {material.lote.sector_solicitante.nombre if material.lote.sector_solicitante else "Sin sector"}',
+                        observaciones=motivo,
+                        usuario_responsable=request.user
+                    )
+                    count += 1
+
+            return Response({
+                'success': True,
+                'message': f'{count} equipos devueltos al sector para gestión de reposición',
+                'count': count,
+                'sectores_afectados': list(sectores_afectados),
+                'fecha_devolucion': timezone.now().date()
+            })
+
+        except (EstadoMaterialONU.DoesNotExist) as e:
+            return Response({'error': f'Estado no configurado: {str(e)}'}, status=500)
+        except Exception as e:
+            return Response({'error': f'Error interno: {str(e)}'}, status=500)
+
+    @action(detail=False, methods=['get'])
+    def devueltos_sector(self, request):
+        """Obtener equipos devueltos al sector"""
+        try:
+            estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_SECTOR_SOLICITANTE', activo=True)
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+
+            materiales = self.get_queryset().filter(
+                tipo_material=tipo_onu,
+                estado_onu=estado_devuelto
+            ).select_related(
+                'lote__sector_solicitante', 'modelo__marca', 'almacen_actual'
+            )
+
+            # Filtro opcional por sector
+            sector_id = request.query_params.get('sector_id')
+            if sector_id:
+                materiales = materiales.filter(lote__sector_solicitante_id=sector_id)
+
+            serializer = MaterialListSerializer(materiales, many=True)
+            return Response({
+                'total': materiales.count(),
+                'materiales': serializer.data,
+                'estado_filtrado': 'DEVUELTO_SECTOR_SOLICITANTE'
+            })
+
+        except (EstadoMaterialONU.DoesNotExist, TipoMaterial.DoesNotExist):
+            return Response({'error': 'Estados no configurados correctamente'}, status=500)
+
 
 # En almacenes/views/material_views.py
 

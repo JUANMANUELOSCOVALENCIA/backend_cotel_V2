@@ -15,14 +15,12 @@ from contratos.serializers import TipoServicioSerializer
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
-    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
-    RespuestaProveedor, Almacen, Proveedor, Marca, Modelo, Lote, Componente  # AGREGADO Modelo
+    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,Almacen, Proveedor, Marca, Modelo, Lote, Componente  # AGREGADO Modelo
 )
 from ..serializers import (
     TipoIngresoSerializer, EstadoLoteSerializer, EstadoTraspasoSerializer,
     TipoMaterialSerializer, UnidadMedidaSerializer, EstadoMaterialONUSerializer,
-    EstadoMaterialGeneralSerializer, TipoAlmacenSerializer, EstadoDevolucionSerializer,
-    RespuestaProveedorSerializer, AlmacenSerializer, ProveedorSerializer,
+    EstadoMaterialGeneralSerializer, TipoAlmacenSerializer,AlmacenSerializer, ProveedorSerializer,
     MarcaSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer,
 )
 
@@ -339,68 +337,6 @@ class TipoAlmacenViewSet(viewsets.ModelViewSet):
             'total_almacenes': almacenes.count(),
             'almacenes': serializer.data
         })
-
-
-class EstadoDevolucionViewSet(viewsets.ModelViewSet):
-    """ViewSet para estados de devolución"""
-    queryset = EstadoDevolucion.objects.all().order_by('orden', 'nombre')
-    serializer_class = EstadoDevolucionSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'estados-devolucion'
-
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['es_final', 'activo']
-    search_fields = ['codigo', 'nombre', 'descripcion']
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        incluir_inactivos = self.request.query_params.get('incluir_inactivos', 'false').lower() == 'true'
-
-        if not incluir_inactivos:
-            queryset = queryset.filter(activo=True)
-
-        return queryset
-
-    @action(detail=False, methods=['get'])
-    def finales(self, request):
-        """Obtener solo estados finales"""
-        estados = self.get_queryset().filter(es_final=True)
-        serializer = self.get_serializer(estados, many=True)
-        return Response(serializer.data)
-
-
-class RespuestaProveedorViewSet(viewsets.ModelViewSet):
-    """ViewSet para respuestas de proveedor"""
-    queryset = RespuestaProveedor.objects.all().order_by('orden', 'nombre')
-    serializer_class = RespuestaProveedorSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'respuestas-proveedor'
-
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['codigo', 'nombre', 'descripcion']
-    ordering_fields = ['codigo', 'nombre', 'orden']
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        incluir_inactivos = self.request.query_params.get('incluir_inactivos', 'false').lower() == 'true'
-
-        if not incluir_inactivos:
-            queryset = queryset.filter(activo=True)
-
-        return queryset
-
-    @action(detail=True, methods=['post'])
-    def toggle_activo(self, request, pk=None):
-        """Activar/desactivar respuesta de proveedor"""
-        respuesta = self.get_object()
-        respuesta.activo = not respuesta.activo
-        respuesta.save()
-
-        return Response({
-            'message': f'Respuesta {respuesta.nombre} {"activada" if respuesta.activo else "desactivada"}',
-            'activo': respuesta.activo
-        })
-
 
 # ========== VIEW ESPECIAL PARA OPCIONES COMPLETAS ==========
 

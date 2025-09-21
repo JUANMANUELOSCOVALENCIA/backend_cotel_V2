@@ -18,8 +18,7 @@ from .models import (
 
     # Modelos de choices (antes TextChoices)
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
-    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen, EstadoDevolucion,
-    RespuestaProveedor,
+    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,
 
     # Modelos existentes actualizados
     Marca, Componente, Modelo, ModeloComponente,
@@ -32,7 +31,6 @@ from .models import (
 
     # Modelos de operaciones
     TraspasoAlmacen, TraspasoMaterial,
-    DevolucionProveedor, DevolucionMaterial,
     HistorialMaterial, InspeccionLaboratorio, SectorSolicitante,
 )
 
@@ -112,19 +110,6 @@ class TipoAlmacenSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoAlmacen
         fields = ['id', 'codigo', 'nombre', 'descripcion', 'activo', 'orden']
-
-
-class EstadoDevolucionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = EstadoDevolucion
-        fields = ['id', 'codigo', 'nombre', 'descripcion', 'color', 'es_final', 'activo', 'orden']
-
-
-class RespuestaProveedorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = RespuestaProveedor
-        fields = ['id', 'codigo', 'nombre', 'descripcion', 'activo', 'orden']
-
 
 # ========== SERIALIZERS BASE ACTUALIZADOS ==========
 
@@ -971,174 +956,6 @@ class TraspasoCreateSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         return TraspasoAlmacenSerializer(instance).data
 
-
-# ========== SERIALIZERS DE DEVOLUCIONES ACTUALIZADOS ==========
-
-class DevolucionMaterialSerializer(serializers.ModelSerializer):
-    material_info = serializers.SerializerMethodField()
-
-    class Meta:
-        model = DevolucionMaterial
-        fields = ['id', 'material', 'material_info', 'motivo_especifico']
-
-    def get_material_info(self, obj):
-        return {
-            'codigo_interno': obj.material.codigo_interno,
-            'descripcion': f"{obj.material.modelo.nombre} - {obj.material.codigo_interno}",
-            'tipo_material': obj.material.tipo_material.nombre
-        }
-
-
-class DevolucionProveedorSerializer(serializers.ModelSerializer):
-    # Información completa de relaciones
-    lote_info = serializers.SerializerMethodField()
-    proveedor_info = serializers.SerializerMethodField()
-    estado_info = serializers.SerializerMethodField()
-    respuesta_proveedor_info = serializers.SerializerMethodField()
-    created_by_info = serializers.SerializerMethodField()
-
-    # Materiales y propiedades
-    materiales_devueltos = DevolucionMaterialSerializer(many=True, read_only=True)
-    cantidad_materiales = serializers.ReadOnlyField()
-
-    class Meta:
-        model = DevolucionProveedor
-        fields = [
-            'id', 'numero_devolucion', 'lote_origen', 'lote_info',
-            'proveedor', 'proveedor_info', 'motivo', 'numero_informe_laboratorio',
-            'estado', 'estado_info', 'fecha_creacion', 'fecha_envio', 'fecha_confirmacion',
-            'respuesta_proveedor', 'respuesta_proveedor_info', 'observaciones_proveedor',
-            'materiales_devueltos', 'cantidad_materiales',
-            'created_by', 'created_by_info', 'updated_at'
-        ]
-        read_only_fields = ['numero_devolucion', 'fecha_creacion', 'updated_at']
-
-    def get_lote_info(self, obj):
-        return {
-            'id': obj.lote_origen.id,
-            'numero_lote': obj.lote_origen.numero_lote
-        }
-
-    def get_proveedor_info(self, obj):
-        return {
-            'id': obj.proveedor.id,
-            'nombre_comercial': obj.proveedor.nombre_comercial
-        }
-
-    def get_estado_info(self, obj):
-        return {
-            'id': obj.estado.id,
-            'codigo': obj.estado.codigo,
-            'nombre': obj.estado.nombre,
-            'color': obj.estado.color,
-            'es_final': obj.estado.es_final
-        }
-
-    def get_respuesta_proveedor_info(self, obj):
-        if obj.respuesta_proveedor:
-            return {
-                'id': obj.respuesta_proveedor.id,
-                'codigo': obj.respuesta_proveedor.codigo,
-                'nombre': obj.respuesta_proveedor.nombre
-            }
-        return None
-
-    def get_created_by_info(self, obj):
-        return {
-            'id': obj.created_by.id,
-            'nombre_completo': obj.created_by.nombre_completo
-        }
-
-
-class DevolucionCreateSerializer(serializers.ModelSerializer):
-    """Serializer para crear devoluciones con materiales"""
-    materiales_ids = serializers.ListField(
-        child=serializers.IntegerField(),
-        write_only=True,
-        help_text="IDs de los materiales a devolver"
-    )
-
-    class Meta:
-        model = DevolucionProveedor
-        fields = [
-            'lote_origen', 'motivo', 'numero_informe_laboratorio', 'materiales_ids'
-        ]
-
-    def validate_materiales_ids(self, value):
-        if not value:
-            raise serializers.ValidationError("Debe seleccionar al menos un material")
-
-        # Verificar que todos los materiales existan y estén defectuosos
-        materiales = Material.objects.filter(id__in=value)
-
-        if materiales.count() != len(value):
-            raise serializers.ValidationError("Algunos materiales no existen")
-
-        for material in materiales:
-            if material.tipo_material.es_unico:
-                # Para equipos únicos, verificar estado defectuoso
-                if not material.estado_onu or material.estado_onu.codigo != 'DEFECTUOSO':
-                    raise serializers.ValidationError(
-                        f"El material {material.codigo_interno} debe estar defectuoso para devolverlo"
-                    )
-
-        return value
-
-    def validate(self, data):
-        # Verificar que los materiales pertenezcan al lote especificado
-        lote = data.get('lote_origen')
-        materiales_ids = data.get('materiales_ids', [])
-
-        if lote:
-            materiales_lote = Material.objects.filter(
-                id__in=materiales_ids,
-                lote=lote
-            ).count()
-
-            if materiales_lote != len(materiales_ids):
-                raise serializers.ValidationError(
-                    "Todos los materiales deben pertenecer al lote especificado"
-                )
-
-        return data
-
-    def create(self, validated_data):
-        materiales_ids = validated_data.pop('materiales_ids')
-        request = self.context.get('request')
-
-        with transaction.atomic():
-            # Obtener el lote para obtener el proveedor
-            lote_origen = validated_data['lote_origen']
-
-            # Buscar estado inicial - SIN usar Response
-            try:
-                estado_pendiente = EstadoDevolucion.objects.get(codigo='PENDIENTE', activo=True)
-            except EstadoDevolucion.DoesNotExist:
-                # ARROJAR UNA EXCEPCIÓN, NO Response
-                raise serializers.ValidationError("Estado PENDIENTE no configurado en el sistema")
-
-            # Crear devolución
-            devolucion = DevolucionProveedor.objects.create(
-                lote_origen=lote_origen,
-                proveedor=lote_origen.proveedor,
-                motivo=validated_data['motivo'],
-                numero_informe_laboratorio=validated_data['numero_informe_laboratorio'],
-                estado=estado_pendiente,
-                created_by=request.user if request else None
-            )
-
-            # Crear relaciones con materiales
-            materiales = Material.objects.filter(id__in=materiales_ids)
-            for material in materiales:
-                DevolucionMaterial.objects.create(
-                    devolucion=devolucion,
-                    material=material
-                )
-
-        return devolucion
-
-    def to_representation(self, instance):
-        return DevolucionProveedorSerializer(instance, context=self.context).data
 # ========== SERIALIZERS DE HISTORIAL ==========
 
 class HistorialMaterialSerializer(serializers.ModelSerializer):
