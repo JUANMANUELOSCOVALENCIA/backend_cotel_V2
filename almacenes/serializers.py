@@ -481,6 +481,7 @@ class LoteCreateSerializer(serializers.ModelSerializer):
         model = Lote
         fields = [
             'numero_lote', 'tipo_ingreso', 'proveedor', 'almacen_destino', 'tipo_servicio',
+            'sector_solicitante',
             'codigo_requerimiento_compra', 'codigo_nota_ingreso',
             'fecha_recepcion', 'fecha_inicio_garantia', 'fecha_fin_garantia',
             'observaciones', 'detalles'

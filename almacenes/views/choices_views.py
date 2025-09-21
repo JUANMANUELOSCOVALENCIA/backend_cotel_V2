@@ -15,13 +15,13 @@ from contratos.serializers import TipoServicioSerializer
 from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
-    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,Almacen, Proveedor, Marca, Modelo, Lote, Componente  # AGREGADO Modelo
+    EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,Almacen, Proveedor, Marca, Modelo, Lote, Componente,SectorSolicitante
 )
 from ..serializers import (
     TipoIngresoSerializer, EstadoLoteSerializer, EstadoTraspasoSerializer,
     TipoMaterialSerializer, UnidadMedidaSerializer, EstadoMaterialONUSerializer,
     EstadoMaterialGeneralSerializer, TipoAlmacenSerializer,AlmacenSerializer, ProveedorSerializer,
-    MarcaSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer,
+    MarcaSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer, SectorSolicitanteSerializer
 )
 
 
@@ -382,10 +382,6 @@ class OpcionesCompletasView(APIView):
             EstadoTraspaso.objects.filter(activo=True).order_by('orden'), many=True
         ).data
 
-        cache_data['estados_devolucion'] = EstadoDevolucionSerializer(
-            EstadoDevolucion.objects.filter(activo=True).order_by('orden'), many=True
-        ).data
-
         # Estados de materiales
         cache_data['estados_material_onu'] = EstadoMaterialONUSerializer(
             EstadoMaterialONU.objects.filter(activo=True).order_by('orden'), many=True
@@ -393,11 +389,6 @@ class OpcionesCompletasView(APIView):
 
         cache_data['estados_material_general'] = EstadoMaterialGeneralSerializer(
             EstadoMaterialGeneral.objects.filter(activo=True).order_by('orden'), many=True
-        ).data
-
-        # Respuestas de proveedores
-        cache_data['respuestas_proveedor'] = RespuestaProveedorSerializer(
-            RespuestaProveedor.objects.filter(activo=True).order_by('orden'), many=True
         ).data
 
         # Entidades principales (con información completa)
@@ -412,6 +403,7 @@ class OpcionesCompletasView(APIView):
         cache_data['marcas'] = MarcaSerializer(
             Marca.objects.filter(activo=True).order_by('nombre'), many=True
         ).data
+
         cache_data['sectores_solicitantes'] = SectorSolicitanteSerializer(
             SectorSolicitante.objects.filter(activo=True).order_by('orden'), many=True
         ).data

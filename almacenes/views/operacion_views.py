@@ -19,7 +19,7 @@ from ..models import (
     Material, HistorialMaterial,
     # Modelos de choices (antes TextChoices)
     EstadoTraspaso,TipoMaterial,
-    EstadoMaterialONU, EstadoMaterialGeneral
+    EstadoMaterialONU, EstadoMaterialGeneral,
 )
 from ..serializers import (
     TraspasoAlmacenSerializer, TraspasoCreateSerializer, TraspasoMaterialSerializer,
