@@ -102,6 +102,8 @@ class ReingresoSectorView(APIView):
 
         materiales = Material.objects.filter(
             estado_onu=estado_devuelto
+        ).exclude(
+            observaciones__icontains='[REEMPLAZADO]'  # Excluir los reemplazados
         ).select_related('lote__sector_solicitante', 'modelo__marca', 'almacen_actual')
 
         serializer = MaterialListSerializer(materiales, many=True)

@@ -1652,7 +1652,7 @@ class DevolucionSectorSerializer(serializers.Serializer):
                 HistorialMaterial.objects.create(
                     material=material,
                     estado_anterior='DEFECTUOSO',
-                    estado_nuevo='DEVUELTO_SECTOR_SOLICITANTE',
+                    estado_nuevo='DEVUELTO_SECTOR',
                     almacen_anterior=material.almacen_actual,
                     almacen_nuevo=material.almacen_actual,
                     motivo=f'Devuelto a sector: {material.lote.sector_solicitante.nombre}',
@@ -1711,8 +1711,10 @@ class ReingresoSectorSerializer(serializers.Serializer):
         return value
 
     def ejecutar(self, user):
-        """Crear nuevos materiales de reingreso"""
-        estado_reingreso = EstadoMaterialONU.objects.get(codigo='REINGRESO_SECTOR', activo=True)
+        """Crear nuevos materiales de reingreso y marcar originales como REEMPLAZADO"""
+        estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
+        estado_reemplazado = EstadoMaterialONU.objects.get(codigo='REEMPLAZADO', activo=True)  # Cambio aquí
+
         tipo_reingreso = TipoIngreso.objects.get(codigo='REINGRESO', activo=True)
         tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
 
@@ -1727,7 +1729,7 @@ class ReingresoSectorSerializer(serializers.Serializer):
             for i, material_original in enumerate(materiales_originales):
                 equipo = nuevos_equipos[i]
 
-                # Crear nuevo material
+                # Crear nuevo material como NUEVO
                 nuevo_material = Material.objects.create(
                     tipo_material=tipo_onu,
                     modelo=material_original.modelo,
@@ -1737,28 +1739,41 @@ class ReingresoSectorSerializer(serializers.Serializer):
                     serial_manufacturer=equipo.get('serial_manufacturer', '') or None,
                     codigo_item_equipo=equipo['codigo_item_equipo'],
                     almacen_actual=material_original.almacen_actual,
-                    estado_onu=estado_reingreso,
-                    es_nuevo=False,
+                    estado_onu=estado_nuevo,
+                    es_nuevo=True,
                     tipo_origen=tipo_reingreso,
                     cantidad=1.00,
                     equipo_original=material_original,
                     numero_entrega_parcial=material_original.numero_entrega_parcial,
-                    observaciones=f"Reingreso desde {material_original.lote.sector_solicitante.nombre}"
+                    observaciones=f"Equipo de reposición desde {material_original.lote.sector_solicitante.nombre}"
                 )
 
-                # Actualizar material original
-                material_original.material_reemplazo = nuevo_material
+                # Marcar original como REEMPLAZADO
+                material_original.estado_onu = estado_reemplazado
+                material_original.observaciones += f"\n[REEMPLAZADO] {timezone.now().date()} - Sustituido por: {nuevo_material.codigo_interno}"
                 material_original.save()
 
-                # Historial
+                # Historial para el nuevo
                 HistorialMaterial.objects.create(
                     material=nuevo_material,
                     estado_anterior='N/A',
-                    estado_nuevo='REINGRESO_SECTOR',
+                    estado_nuevo='NUEVO',
                     almacen_anterior=None,
                     almacen_nuevo=nuevo_material.almacen_actual,
-                    motivo=f'Reingreso desde {material_original.lote.sector_solicitante.nombre}',
+                    motivo=f'Reposición desde {material_original.lote.sector_solicitante.nombre}',
                     observaciones=f'Reemplaza {material_original.codigo_interno}',
+                    usuario_responsable=user
+                )
+
+                # Historial para el original
+                HistorialMaterial.objects.create(
+                    material=material_original,
+                    estado_anterior='DEVUELTO_SECTOR',
+                    estado_nuevo='REEMPLAZADO',
+                    almacen_anterior=material_original.almacen_actual,
+                    almacen_nuevo=material_original.almacen_actual,
+                    motivo='Equipo reemplazado por reposición',
+                    observaciones=f'Sustituido por {nuevo_material.codigo_interno}',
                     usuario_responsable=user
                 )
 

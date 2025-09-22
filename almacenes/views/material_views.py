@@ -15,6 +15,7 @@ from usuarios.permissions import GenericRolePermission
 from .. import models
 from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, Modelo, InspeccionLaboratorio, \
     HistorialMaterial, TipoIngreso
+from ..pagination import CustomPageNumberPagination
 from ..serializers import MaterialListSerializer, MaterialDetailSerializer
 
 
@@ -69,6 +70,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
         'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen'
     ).order_by('-created_at')
 
+    pagination_class = CustomPageNumberPagination
     permission_classes = [IsAuthenticated, GenericRolePermission]
     basename = 'materiales'
 
