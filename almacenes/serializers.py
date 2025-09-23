@@ -480,7 +480,7 @@ class LoteCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Lote
         fields = [
-            'numero_lote', 'tipo_ingreso', 'proveedor', 'almacen_destino', 'tipo_servicio',
+            'tipo_ingreso', 'proveedor', 'almacen_destino', 'tipo_servicio',
             'sector_solicitante',
             'codigo_requerimiento_compra', 'codigo_nota_ingreso',
             'fecha_recepcion', 'fecha_inicio_garantia', 'fecha_fin_garantia',
@@ -495,22 +495,21 @@ class LoteCreateSerializer(serializers.ModelSerializer):
             self.fields['detalles'].required = False
             self.fields['detalles'].allow_empty = True
 
-    def validate_codigo_requerimiento_compra(self, value):
-        if not (6 <= len(value) <= 10) or not value.isdigit():
-            raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
-        return value
-
-    def validate_codigo_nota_ingreso(self, value):
-        if not (6 <= len(value) <= 10) or not value.isdigit():
-            raise serializers.ValidationError("Debe tener entre 6 y 10 dígitos numéricos")
-        return value
-
+    # ✅ AGREGAR: Validación personalizada para almacén por defecto
     def validate(self, data):
-        # ✅ AGREGAR: Validación condicional de detalles
-        # Solo validar detalles si es creación O si se proporcionan detalles
+        # Validar detalles solo en creación
         if self.instance is None:  # CREATE
             if not data.get('detalles'):
                 raise serializers.ValidationError({"detalles": "Los detalles son requeridos para crear un lote"})
+
+        # ✅ NUEVO: Si no se proporciona almacén, usar el ID=1 por defecto
+        if not data.get('almacen_destino'):
+            try:
+                from .models import Almacen
+                almacen_principal = Almacen.objects.get(id=1)
+                data['almacen_destino'] = almacen_principal
+            except Almacen.DoesNotExist:
+                raise serializers.ValidationError("Almacén principal (ID=1) no encontrado")
 
         # Validar fechas de garantía
         if data.get('fecha_fin_garantia') and data.get('fecha_inicio_garantia'):
@@ -537,6 +536,9 @@ class LoteCreateSerializer(serializers.ModelSerializer):
             except EstadoLote.DoesNotExist:
                 pass
 
+            # ✅ NUEVO: Generar número de lote automáticamente
+            # (El método save() del modelo se encargará de esto)
+
             lote = Lote.objects.create(**validated_data)
 
             for detalle_data in detalles_data:
@@ -545,17 +547,16 @@ class LoteCreateSerializer(serializers.ModelSerializer):
         return lote
 
     def update(self, instance, validated_data):
-        # ✅ AGREGAR: Método update para manejar actualizaciones
-        # Remover detalles de validated_data si existe (no se actualizan en edición)
+        # Remover detalles de validated_data si existe
         detalles_data = validated_data.pop('detalles', None)
+
+        # ✅ IMPORTANTE: No actualizar numero_lote en updates
+        validated_data.pop('numero_lote', None)
 
         # Actualizar campos del lote
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
-
-        # Nota: Los detalles no se actualizan en la edición del lote
-        # Si se necesita modificar detalles, se hace por separado
 
         return instance
 

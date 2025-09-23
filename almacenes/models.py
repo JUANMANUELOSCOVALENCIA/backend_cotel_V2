@@ -464,6 +464,37 @@ class ModeloComponente(models.Model):
 
 
 # ========== MODELO DE LOTE ==========
+def generar_numero_lote():
+    """Genera el siguiente número de lote correlativo en formato L000001, L000002, etc."""
+    from django.db import transaction
+
+    with transaction.atomic():
+        # Obtener el último lote ordenado por numero_lote
+        ultimo_lote = Lote.objects.filter(
+            numero_lote__startswith='L'
+        ).exclude(numero_lote='').order_by('numero_lote').last()
+
+        if ultimo_lote:
+            try:
+                # Extraer el número del formato L000001 -> 1
+                ultimo_numero = int(ultimo_lote.numero_lote[1:])
+                siguiente_numero = ultimo_numero + 1
+            except (ValueError, IndexError):
+                # Si hay error en el formato, empezar desde 1
+                siguiente_numero = 1
+        else:
+            # Primer lote
+            siguiente_numero = 1
+
+        # Formatear como L000001, L000002, etc. (6 dígitos con ceros a la izquierda)
+        nuevo_numero = f"L{siguiente_numero:06d}"
+
+        # Verificar que no exista (por seguridad)
+        while Lote.objects.filter(numero_lote=nuevo_numero).exists():
+            siguiente_numero += 1
+            nuevo_numero = f"L{siguiente_numero:06d}"
+
+        return nuevo_numero
 
 class Lote(models.Model):
     """Modelo de lote con referencias a ForeignKeys"""
@@ -537,6 +568,12 @@ class Lote(models.Model):
 
     def __str__(self):
         return f"{self.numero_lote} - {self.proveedor.nombre_comercial}"
+
+    def save(self, *args, **kwargs):
+        """Override save para generar número automático si no existe o está vacío"""
+        if not self.numero_lote or self.numero_lote.strip() == '':
+            self.numero_lote = generar_numero_lote()
+        super().save(*args, **kwargs)
 
     @property
     def cantidad_total(self):

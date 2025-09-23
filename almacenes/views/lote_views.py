@@ -22,7 +22,7 @@ from usuarios.permissions import GenericRolePermission
 from ..models import (
     Lote, LoteDetalle, EntregaParcialLote, Material, Almacen,
     TipoIngreso, EstadoLote, TipoMaterial, EstadoMaterialONU, Modelo,
-    EntregaParcialLote
+    EntregaParcialLote, generar_numero_lote
 )
 from ..serializers import (
     LoteSerializer, LoteCreateSerializer, LoteDetalleSerializer,
@@ -574,6 +574,21 @@ class LoteViewSet(viewsets.ModelViewSet):
             'message': f'Lote {lote.numero_lote} reabierto correctamente',
             'estado': lote.estado.nombre if lote.estado else 'Sin estado'
         })
+
+    @action(detail=False, methods=['get'])
+    def proximo_numero(self, request):
+        """Obtener el próximo número de lote disponible"""
+        try:
+            proximo_numero = generar_numero_lote()
+            return Response({
+                'proximo_numero': proximo_numero,
+                'mensaje': f'El próximo lote será: {proximo_numero}'
+            })
+        except Exception as e:
+            return Response(
+                {'error': f'Error al generar próximo número: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['get'])
     def materiales(self, request, pk=None):
