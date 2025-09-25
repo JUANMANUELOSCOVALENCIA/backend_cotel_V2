@@ -42,14 +42,37 @@ class MaterialFilter(django_filters.FilterSet):
     # Filtros booleanos
     es_nuevo = django_filters.BooleanFilter()
 
+    # ✅ NUEVOS FILTROS PARA TIPOS DE MATERIAL
+    tipo_material_codigo = django_filters.CharFilter(method='filter_tipo_material')
+    solo_unicos = django_filters.BooleanFilter(method='filter_solo_unicos')
+    solo_no_unicos = django_filters.BooleanFilter(method='filter_solo_no_unicos')
+
     def filter_tipo_material(self, queryset, name, value):
-        """Filtro personalizado para tipo_material"""
+        """Filtro personalizado para tipo_material por código"""
         if value:
             try:
                 tipo = TipoMaterial.objects.get(codigo=value, activo=True)
                 return queryset.filter(tipo_material=tipo)
             except TipoMaterial.DoesNotExist:
                 return queryset.none()
+        return queryset
+
+    # ✅ NUEVO: Filtro para materiales únicos solamente
+    def filter_solo_unicos(self, queryset, name, value):
+        """Filtro para obtener solo materiales únicos (ONUs)"""
+        if value is True:
+            return queryset.filter(tipo_material__es_unico=True)
+        elif value is False:
+            return queryset.filter(tipo_material__es_unico=False)
+        return queryset
+
+    # ✅ NUEVO: Filtro para materiales no únicos solamente
+    def filter_solo_no_unicos(self, queryset, name, value):
+        """Filtro para obtener solo materiales no únicos (cables, etc.)"""
+        if value is True:
+            return queryset.filter(tipo_material__es_unico=False)
+        elif value is False:
+            return queryset.filter(tipo_material__es_unico=True)
         return queryset
 
     class Meta:
@@ -60,6 +83,8 @@ class MaterialFilter(django_filters.FilterSet):
             'modelo': ['exact'],
             'estado_onu': ['exact'],
             'tipo_origen': ['exact'],
+            # ✅ AGREGAR: Filtro directo por es_unico
+            'tipo_material__es_unico': ['exact'],
         }
 
 

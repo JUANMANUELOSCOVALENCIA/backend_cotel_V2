@@ -781,6 +781,15 @@ class MaterialListSerializer(serializers.ModelSerializer):
                 'color': getattr(obj.estado_onu, 'color', '#gray'),
                 'permite_asignacion': getattr(obj.estado_onu, 'permite_asignacion', False)
             }
+        elif not obj.tipo_material.es_unico and obj.estado_general:
+            # Para materiales no únicos
+            return {
+                'id': obj.estado_general.id,
+                'codigo': obj.estado_general.codigo,
+                'nombre': obj.estado_general.nombre,
+                'color': getattr(obj.estado_general, 'color', '#gray'),
+                'permite_consumo': getattr(obj.estado_general, 'permite_consumo', False)
+            }
         return None
 
     def get_tipo_material_info(self, obj):
@@ -1380,7 +1389,6 @@ class EstadisticasGeneralesSerializer(serializers.Serializer):
         # Se usa solo para estructurar la respuesta de estadísticas
         pass
 
-
 class ListaOpcionesSerializer(serializers.Serializer):
     """Serializer para endpoints que devuelven listas de opciones para React"""
 
@@ -1462,9 +1470,6 @@ class MaterialDetailSerializer(MaterialListSerializer):
             'usuario': getattr(h.usuario_responsable, 'nombre_completo', 'Usuario') if h.usuario_responsable else None
         } for h in historial]
 
-
-# Agregar estos serializers a tu archivo existente
-
 class ComponenteCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer para crear/actualizar componentes"""
 
@@ -1484,7 +1489,6 @@ class ComponenteCreateUpdateSerializer(serializers.ModelSerializer):
                 f"Ya existe un componente con nombre: {value}"
             )
         return value
-
 
 class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer para crear/actualizar modelos"""
@@ -1552,9 +1556,6 @@ class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
 
         return instance
 
-
-# En almacenes/serializers.py
-
 class InspeccionLaboratorioSerializer(serializers.ModelSerializer):
     material_info = serializers.SerializerMethodField()
 
@@ -1569,7 +1570,6 @@ class InspeccionLaboratorioSerializer(serializers.ModelSerializer):
             'modelo': obj.material.modelo.nombre
         }
 
-
 class ReingresoMaterialSerializer(serializers.Serializer):
     material_original_id = serializers.IntegerField()
     mac_address = serializers.CharField(max_length=17)
@@ -1577,9 +1577,6 @@ class ReingresoMaterialSerializer(serializers.Serializer):
     serial_manufacturer = serializers.CharField(max_length=100)
     codigo_item_equipo = serializers.CharField(max_length=10)
     motivo_reingreso = serializers.CharField(required=False)
-
-
-# ========== SERIALIZER SIMPLIFICADO PARA SECTORES SOLICITANTES ==========
 
 class SectorSolicitanteSerializer(serializers.ModelSerializer):
     materiales_count = serializers.SerializerMethodField()

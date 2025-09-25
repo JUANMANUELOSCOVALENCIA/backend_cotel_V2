@@ -22,7 +22,7 @@ from usuarios.permissions import GenericRolePermission
 from ..models import (
     Lote, LoteDetalle, EntregaParcialLote, Material, Almacen,
     TipoIngreso, EstadoLote, TipoMaterial, EstadoMaterialONU, Modelo,
-    EntregaParcialLote, generar_numero_lote
+    EntregaParcialLote, generar_numero_lote, EstadoMaterialGeneral
 )
 from ..serializers import (
     LoteSerializer, LoteCreateSerializer, LoteDetalleSerializer,
@@ -726,21 +726,75 @@ class LoteViewSet(viewsets.ModelViewSet):
             'lotes_activos': lotes_activos
         })
 
+    @action(detail=True, methods=['post'])
+    def completar_recepcion(self, request, pk=None):
+        """Auto-completar materiales no únicos según LoteDetalle"""
+        lote = self.get_object()
+
+        # Validar que no esté cerrado
+        try:
+            estado_cerrado = EstadoLote.objects.get(codigo='CERRADO', activo=True)
+            if lote.estado == estado_cerrado:
+                return Response({
+                    'error': 'El lote está cerrado'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except EstadoLote.DoesNotExist:
+            pass
+
+        with transaction.atomic():
+            materiales_creados = []
+
+            for detalle in lote.detalles.all():
+                # Solo procesar materiales NO únicos
+                if not detalle.modelo.tipo_material.es_unico:
+                    cantidad_pendiente = detalle.cantidad_pendiente
+
+                    if cantidad_pendiente > 0:
+                        # Crear material por cantidad
+                        try:
+                            estado_disponible = EstadoMaterialGeneral.objects.get(
+                                codigo='DISPONIBLE', activo=True
+                            )
+                        except EstadoMaterialGeneral.DoesNotExist:
+                            estado_disponible = None
+
+                        material = Material.objects.create(
+                            lote=lote,
+                            modelo=detalle.modelo,
+                            tipo_material=detalle.modelo.tipo_material,
+                            almacen_actual=lote.almacen_destino,
+                            cantidad=cantidad_pendiente,
+                            codigo_item_equipo=request.data.get('codigo_item_equipo', ''),
+                            estado_general=estado_disponible,
+                            es_nuevo=lote.tipo_ingreso.codigo == 'NUEVO',
+                            tipo_origen=lote.tipo_ingreso,
+                            observaciones=f"Auto-completado: {cantidad_pendiente} {detalle.modelo.unidad_medida.simbolo if detalle.modelo.unidad_medida else 'unidades'}"
+                        )
+                        materiales_creados.append(material)
+
+            return Response({
+                'message': f'{len(materiales_creados)} materiales auto-completados',
+                'materiales_creados': len(materiales_creados)
+            })
+
+
+# ======================================================
+# almacenes/views/lote_views.py - ImportacionMasivaView COMPLETA
+# ======================================================
 
 class ImportacionMasivaView(APIView):
-    """View para importación masiva de materiales desde Excel/CSV"""
+    """View para importación masiva de materiales desde Excel/CSV - SOPORTE DUAL"""
     permission_classes = [IsAuthenticated, GenericRolePermission]
     parser_classes = [MultiPartParser, FormParser]
     basename = 'lotes'
 
     def post(self, request, *args, **kwargs):
-        """Procesar archivo de importación masiva"""
-        print("🔍 === INICIO IMPORTACION MASIVA ===")
+        """Procesar archivo de importación masiva - DETECCIÓN AUTOMÁTICA DE TIPO"""
+        print("🔍 === INICIO IMPORTACION MASIVA DUAL ===")
         try:
             # Obtener parámetros
             lote_id = request.data.get('lote_id')
             modelo_id = request.data.get('modelo_id')
-            item_equipo = request.data.get('item_equipo')
             archivo = request.FILES.get('archivo')
             numero_entrega = request.data.get('numero_entrega')
             entrega_seleccionada = request.data.get('entrega_seleccionada')
@@ -749,29 +803,75 @@ class ImportacionMasivaView(APIView):
             print(f"🔍 DEBUG PARAMETROS RECIBIDOS:")
             print(f"   lote_id: '{lote_id}' (tipo: {type(lote_id)})")
             print(f"   modelo_id: '{modelo_id}' (tipo: {type(modelo_id)})")
-            print(f"   item_equipo: '{item_equipo}' (tipo: {type(item_equipo)})")
+            print(f"   archivo: {archivo.name if archivo else 'None'}")
             print(f"   numero_entrega: '{numero_entrega}' (tipo: {type(numero_entrega)})")
             print(f"   entrega_seleccionada: '{entrega_seleccionada}' (tipo: {type(entrega_seleccionada)})")
-            print(f"   archivo: {archivo.name if archivo else 'None'}")
             print(f"   es_validacion: {es_validacion}")
 
-            # Validar parámetros requeridos
-            if not all([lote_id, modelo_id, item_equipo, archivo]):
+            # Validar parámetros requeridos básicos
+            if not all([lote_id, modelo_id, archivo]):
                 print(f"❌ Faltan parámetros:")
                 print(f"   lote_id presente: {bool(lote_id)}")
                 print(f"   modelo_id presente: {bool(modelo_id)}")
-                print(f"   item_equipo presente: {bool(item_equipo)}")
                 print(f"   archivo presente: {bool(archivo)}")
                 return Response({
                     'success': False,
-                    'error': 'Faltan parámetros requeridos: lote_id, modelo_id, item_equipo, archivo'
+                    'error': 'Faltan parámetros requeridos: lote_id, modelo_id, archivo'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             if entrega_seleccionada:
                 numero_entrega = entrega_seleccionada
                 print(f"   Usando entrega seleccionada: {numero_entrega}")
 
-            # Limpiar y validar ITEM_EQUIPO
+            # Validar que el lote y modelo existen
+            try:
+                lote = Lote.objects.get(id=lote_id)
+                modelo = Modelo.objects.get(id=modelo_id)
+                print(f"✅ Lote encontrado: {lote.numero_lote}")
+                print(f"✅ Modelo encontrado: {modelo.nombre}")
+            except (Lote.DoesNotExist, Modelo.DoesNotExist):
+                return Response({
+                    'success': False,
+                    'error': 'Lote o modelo no encontrado'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # ✅ DETECCIÓN AUTOMÁTICA DEL TIPO DE MATERIAL
+            es_material_unico = modelo.tipo_material.es_unico
+            print(f"🔍 TIPO DE MATERIAL DETECTADO:")
+            print(f"   Modelo: {modelo.nombre}")
+            print(f"   Tipo Material: {modelo.tipo_material.nombre} (código: {modelo.tipo_material.codigo})")
+            print(f"   Es Único: {es_material_unico}")
+
+            if es_material_unico:
+                print("🔄 Procesando como MATERIAL ÚNICO (ONU)")
+                return self._procesar_materiales_unicos(
+                    request, lote, modelo, archivo, numero_entrega, es_validacion
+                )
+            else:
+                print("🔄 Procesando como MATERIAL NO ÚNICO (cantidad)")
+                return self._procesar_materiales_no_unicos(
+                    request, lote, modelo, archivo, numero_entrega, es_validacion
+                )
+
+        except Exception as e:
+            print(f"💥 ERROR GENERAL: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response({
+                'success': False,
+                'error': f'Error interno: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        finally:
+            print("🔍 === FIN IMPORTACION MASIVA DUAL ===")
+
+    def _procesar_materiales_unicos(self, request, lote, modelo, archivo, numero_entrega, es_validacion):
+        """Procesar materiales únicos (ONUs) - CÓDIGO ORIGINAL MEJORADO"""
+        print("🔍 === PROCESANDO MATERIALES ÚNICOS (ONUs) ===")
+
+        try:
+            # Obtener ITEM_EQUIPO desde request
+            item_equipo = request.data.get('item_equipo')
             item_equipo_str = str(item_equipo).strip() if item_equipo else ""
             print(f"🔍 ITEM_EQUIPO procesado: '{item_equipo_str}' (length: {len(item_equipo_str)})")
 
@@ -786,25 +886,13 @@ class ImportacionMasivaView(APIView):
             print(f"✅ ITEM_EQUIPO válido: '{item_equipo_str}'")
             item_equipo = item_equipo_str
 
-            # Validar que el lote y modelo existen
-            try:
-                lote = Lote.objects.get(id=lote_id)
-                modelo = Modelo.objects.get(id=modelo_id)
-                print(f"✅ Lote encontrado: {lote.numero_lote}")
-                print(f"✅ Modelo encontrado: {modelo.nombre}")
-            except (Lote.DoesNotExist, Modelo.DoesNotExist):
-                return Response({
-                    'success': False,
-                    'error': 'Lote o modelo no encontrado'
-                }, status=status.HTTP_404_NOT_FOUND)
-
             # Verificar modelo Material
             print("🔍 Verificando modelo Material...")
             try:
                 total_materiales_antes = Material.objects.count()
-                materiales_lote_antes = Material.objects.filter(lote_id=lote_id).count()
+                materiales_lote_antes = Material.objects.filter(lote_id=lote.id).count()
                 print(f"📊 Materiales en sistema: {total_materiales_antes}")
-                print(f"📊 Materiales en lote {lote_id}: {materiales_lote_antes}")
+                print(f"📊 Materiales en lote {lote.id}: {materiales_lote_antes}")
             except Exception as e:
                 print(f"❌ Error accediendo a Material: {e}")
                 return Response({
@@ -961,7 +1049,8 @@ class ImportacionMasivaView(APIView):
                 'errores': len(errores),
                 'item_equipo_aplicado': item_equipo,
                 'numero_entrega': numero_entrega,
-                'columna_d_sn_presente': 'D_SN' in df.columns
+                'columna_d_sn_presente': 'D_SN' in df.columns,
+                'tipo_material': 'UNICO'
             }
 
             print(f"📊 Procesamiento completado:")
@@ -1221,10 +1310,9 @@ class ImportacionMasivaView(APIView):
 
             # Verificar resultados finales
             total_materiales_despues = Material.objects.count()
-            materiales_lote_despues = Material.objects.filter(lote_id=lote_id).count()
+            materiales_lote_despues = Material.objects.filter(lote_id=lote.id).count()
             print(f"📊 Materiales en sistema después: {total_materiales_despues}")
             print(f"📊 Materiales en lote después: {materiales_lote_despues}")
-            print(f"🎯 Diferencia: +{materiales_lote_despues - materiales_lote_antes}")
 
             # ✅ RESPUESTA EXITOSA
             return Response({
@@ -1235,64 +1323,451 @@ class ImportacionMasivaView(APIView):
             })
 
         except Exception as e:
-            print(f"💥 ERROR GENERAL: {str(e)}")
+            print(f"💥 ERROR EN MATERIALES ÚNICOS: {str(e)}")
             import traceback
             traceback.print_exc()
             return Response({
                 'success': False,
-                'error': f'Error interno: {str(e)}'
+                'error': f'Error procesando materiales únicos: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        finally:
-            print("🔍 === FIN IMPORTACION MASIVA ===")
+    def _procesar_materiales_no_unicos(self, request, lote, modelo, archivo, numero_entrega, es_validacion):
+        """Procesar materiales no únicos (cables, conectores, etc.) - NUEVO FLUJO"""
+        print("🔍 === PROCESANDO MATERIALES NO ÚNICOS (CANTIDAD) ===")
+
+        try:
+            # Procesar archivo
+            try:
+                if archivo.name.endswith('.csv'):
+                    df = pd.read_csv(archivo)
+                elif archivo.name.endswith('.xlsx'):
+                    df = pd.read_excel(archivo)
+                else:
+                    return Response({
+                        'success': False,
+                        'error': 'Formato de archivo no soportado. Use CSV o Excel (.xlsx)'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                print(f"✅ Archivo leído: {len(df)} filas")
+                print(f"📝 Columnas disponibles: {list(df.columns)}")
+
+            except Exception as e:
+                print(f"💥 Error leyendo archivo: {str(e)}")
+                return Response({
+                    'success': False,
+                    'error': f'Error al leer archivo: {str(e)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ VALIDAR COLUMNAS PARA MATERIALES NO ÚNICOS
+            columnas_requeridas = ['CANTIDAD', 'ITEM_EQUIPO']
+            columnas_opcionales = ['OBSERVACIONES', 'LOTE_PROVEEDOR']
+
+            columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+
+            if columnas_faltantes:
+                return Response({
+                    'success': False,
+                    'error': f'Para materiales no únicos se requieren las columnas: {", ".join(columnas_requeridas)}. Faltantes: {", ".join(columnas_faltantes)}. Opcionales: {", ".join(columnas_opcionales)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            print(f"✅ Columnas validadas para materiales no únicos")
+
+            # Validar tamaño del archivo
+            if len(df) > 100:
+                return Response({
+                    'success': False,
+                    'error': 'Para materiales no únicos, el archivo no puede tener más de 100 filas'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ PROCESAR DATOS PARA MATERIALES NO ÚNICOS
+            lotes_validos = []
+            errores = []
+            cantidad_total_calculada = 0
+
+            for index, row in df.iterrows():
+                fila_num = index + 2
+                errores_fila = []
+
+                # Extraer datos
+                try:
+                    cantidad = float(row['CANTIDAD']) if pd.notna(row['CANTIDAD']) else 0
+                    item_equipo = str(row['ITEM_EQUIPO']).strip() if pd.notna(row['ITEM_EQUIPO']) else ''
+                    observaciones = str(row.get('OBSERVACIONES', '')).strip() if pd.notna(
+                        row.get('OBSERVACIONES', '')) else ''
+                    lote_proveedor = str(row.get('LOTE_PROVEEDOR', '')).strip() if pd.notna(
+                        row.get('LOTE_PROVEEDOR', '')) else ''
+                except Exception as e:
+                    errores_fila.append(f'Error procesando datos: {str(e)}')
+
+                # Validaciones
+                if cantidad <= 0:
+                    errores_fila.append('CANTIDAD debe ser mayor a 0')
+                elif cantidad > 10000:  # Límite razonable
+                    errores_fila.append('CANTIDAD no puede ser mayor a 10,000')
+
+                if not item_equipo:
+                    errores_fila.append('ITEM_EQUIPO es requerido')
+                elif not re.match(r'^\d{6,10}$', item_equipo):
+                    errores_fila.append('ITEM_EQUIPO debe tener entre 6 y 10 dígitos numéricos')
+
+                # Crear datos del lote de material
+                if not errores_fila:
+                    lote_data = {
+                        'cantidad': cantidad,
+                        'codigo_item_equipo': item_equipo,
+                        'observaciones': observaciones,
+                        'lote_proveedor': lote_proveedor,
+                        'fila': fila_num
+                    }
+                    lotes_validos.append(lote_data)
+                    cantidad_total_calculada += cantidad
+                else:
+                    errores.append({
+                        'fila': fila_num,
+                        'cantidad': cantidad if 'cantidad' in locals() else 'N/A',
+                        'item_equipo': item_equipo if 'item_equipo' in locals() else 'N/A',
+                        'errores': errores_fila
+                    })
+
+            # Preparar resultado
+            resultado = {
+                'total_filas': len(df),
+                'validados': len(lotes_validos),
+                'errores': len(errores),
+                'cantidad_total': cantidad_total_calculada,
+                'numero_entrega': numero_entrega,
+                'tipo_material': 'NO_UNICO'
+            }
+
+            print(f"📊 Procesamiento completado:")
+            print(f"   Total filas: {len(df)}")
+            print(f"   Lotes válidos: {len(lotes_validos)}")
+            print(f"   Cantidad total: {cantidad_total_calculada}")
+            print(f"   Errores: {len(errores)}")
+
+            # Si es solo validación, devolver preview
+            if es_validacion:
+                resultado.update({
+                    'lotes_validos': lotes_validos[:5],  # Solo primeros 5 para preview
+                    'detalles_errores': errores[:10]  # Solo primeros 10 errores
+                })
+
+                return Response({
+                    'success': True,
+                    'message': 'Validación completada',
+                    'resultado': resultado
+                })
+
+            # Si no hay lotes válidos, devolver error
+            if len(lotes_validos) == 0:
+                return Response({
+                    'success': False,
+                    'error': 'No hay lotes de materiales válidos para importar',
+                    'resultado': resultado,
+                    'detalles_errores': errores[:20]
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ PROCEDER CON LA IMPORTACIÓN REAL DE MATERIALES NO ÚNICOS
+            with transaction.atomic():
+                importados = 0
+                cantidad_total_importada = 0
+                errores_importacion = []
+
+                print(f"🔍 Iniciando importación de {len(lotes_validos)} lotes de materiales")
+
+                # Obtener referencias necesarias
+                try:
+                    # Usar el tipo de material del modelo directamente
+                    tipo_material = modelo.tipo_material
+                    estado_disponible = None
+
+                    # Obtener estado apropiado según el tipo de material
+                    if not tipo_material.es_unico:
+                        try:
+                            from ..models import EstadoMaterialGeneral
+                            estado_disponible = EstadoMaterialGeneral.objects.get(codigo='DISPONIBLE', activo=True)
+                        except ImportError:
+                            print("⚠️ EstadoMaterialGeneral no disponible")
+                        except:
+                            print("⚠️ Estado DISPONIBLE no encontrado para materiales generales")
+
+                    tipo_ingreso = lote.tipo_ingreso
+
+                    print(f"✅ Referencias obtenidas:")
+                    print(f"   Tipo Material: {tipo_material}")
+                    print(f"   Estado disponible: {estado_disponible}")
+                    print(f"   Tipo ingreso: {tipo_ingreso}")
+
+                except Exception as e:
+                    print(f"❌ Error obteniendo referencias: {e}")
+                    return Response({
+                        'success': False,
+                        'error': f'Configuración incompleta: {str(e)}'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                # ✅ CREAR CADA MATERIAL POR CANTIDAD
+                for index, lote_material in enumerate(lotes_validos):
+                    try:
+                        print(
+                            f"📦 Creando material {index + 1}/{len(lotes_validos)}: {lote_material['cantidad']} {modelo.unidad_medida.simbolo if modelo.unidad_medida else 'unidades'}")
+
+                        # Preparar observaciones
+                        observaciones_completas = f"Importación masiva - {lote_material['observaciones']}" if \
+                        lote_material['observaciones'] else "Importación masiva"
+                        if lote_material['lote_proveedor']:
+                            observaciones_completas += f" | Lote proveedor: {lote_material['lote_proveedor']}"
+                        if numero_entrega:
+                            observaciones_completas += f" | Entrega #{numero_entrega}"
+
+                        material = Material.objects.create(
+                            # Relaciones básicas
+                            tipo_material=tipo_material,
+                            modelo=modelo,
+                            lote=lote,
+
+                            # ✅ DATOS PARA MATERIAL NO ÚNICO
+                            codigo_item_equipo=lote_material['codigo_item_equipo'],
+                            cantidad=lote_material['cantidad'],
+
+                            # ✅ NÚMERO DE ENTREGA PARCIAL
+                            numero_entrega_parcial=numero_entrega,
+
+                            # Ubicación y estado
+                            almacen_actual=lote.almacen_destino,
+                            estado_general=estado_disponible,
+
+                            # Control de origen
+                            es_nuevo=lote.tipo_ingreso.codigo == 'NUEVO' if lote.tipo_ingreso else True,
+                            tipo_origen=tipo_ingreso,
+
+                            # Campos específicos para equipos únicos (vacíos para materiales no únicos)
+                            mac_address=None,
+                            gpon_serial=None,
+                            serial_manufacturer=None,
+
+                            # Observaciones
+                            observaciones=observaciones_completas
+                        )
+
+                        print(
+                            f"✅ Material creado: ID={material.id}, Código={material.codigo_interno}, Cantidad={material.cantidad}")
+                        importados += 1
+                        cantidad_total_importada += lote_material['cantidad']
+
+                    except Exception as e:
+                        error_msg = f"Error creando material cantidad {lote_material['cantidad']}: {str(e)}"
+                        print(f"❌ {error_msg}")
+                        errores_importacion.append({
+                            'cantidad': lote_material['cantidad'],
+                            'item_equipo': lote_material['codigo_item_equipo'],
+                            'error': str(e)
+                        })
+                        continue
+
+                print(
+                    f"🎯 Importación completada: {importados} lotes de materiales creados, cantidad total: {cantidad_total_importada}")
+
+                # ✅ CREAR O ACTUALIZAR ENTREGA PARCIAL PARA MATERIALES NO ÚNICOS
+                if importados > 0:
+                    try:
+                        print(f"📦 Procesando entrega parcial para materiales no únicos...")
+
+                        if numero_entrega:
+                            # Caso: Se seleccionó una entrega específica
+                            print(f"🔍 Actualizando entrega #{numero_entrega} seleccionada...")
+
+                            try:
+                                entrega_parcial = EntregaParcialLote.objects.get(
+                                    lote=lote,
+                                    numero_entrega=int(numero_entrega)
+                                )
+
+                                # Actualizar observaciones
+                                nueva_observacion = f"Importados {importados} lotes de materiales (cantidad total: {cantidad_total_importada}) el {timezone.now().date()}"
+                                if entrega_parcial.observaciones:
+                                    entrega_parcial.observaciones += f" | {nueva_observacion}"
+                                else:
+                                    entrega_parcial.observaciones = nueva_observacion
+
+                                entrega_parcial.save()
+
+                                print(f"✅ Entrega #{numero_entrega} actualizada exitosamente")
+
+                            except EntregaParcialLote.DoesNotExist:
+                                return Response({
+                                    'success': False,
+                                    'error': f'La entrega #{numero_entrega} no existe'
+                                }, status=status.HTTP_404_NOT_FOUND)
+
+                        else:
+                            # Caso: Crear nueva entrega automática
+                            print(f"🆕 Creando nueva entrega automática...")
+
+                            # Obtener el próximo número de entrega
+                            ultima_entrega = EntregaParcialLote.objects.filter(
+                                lote=lote
+                            ).order_by('-numero_entrega').first()
+
+                            siguiente_numero = (ultima_entrega.numero_entrega + 1) if ultima_entrega else 1
+
+                            try:
+                                estado_activo = EstadoLote.objects.get(codigo='ACTIVO', activo=True)
+                            except EstadoLote.DoesNotExist:
+                                estado_activo = EstadoLote.objects.filter(activo=True).first()
+
+                            # Crear nueva entrega parcial con la cantidad total importada
+                            nueva_entrega = EntregaParcialLote.objects.create(
+                                lote=lote,
+                                numero_entrega=siguiente_numero,
+                                cantidad_entregada=int(cantidad_total_importada),  # ✅ Usar cantidad total
+                                fecha_entrega=timezone.now().date(),
+                                estado_entrega=estado_activo,
+                                observaciones=f"Entrega automática - {importados} lotes de materiales (cantidad total: {cantidad_total_importada})"
+                            )
+
+                            # Actualizar los materiales con el número de entrega
+                            Material.objects.filter(
+                                lote=lote,
+                                numero_entrega_parcial__isnull=True
+                            ).update(numero_entrega_parcial=siguiente_numero)
+
+                            print(
+                                f"✅ Nueva entrega #{siguiente_numero} creada con cantidad total {cantidad_total_importada}")
+
+                    except Exception as e:
+                        print(f"⚠️ Error procesando entrega parcial: {e}")
+                        return Response({
+                            'success': False,
+                            'error': f'Error procesando entrega parcial: {str(e)}'
+                        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                # ✅ ACTUALIZAR ESTADO DEL LOTE
+                try:
+                    print(f"📊 Actualizando estado del lote...")
+
+                    # Calcular total entregado basado en entregas parciales
+                    total_entregado_entregas = EntregaParcialLote.objects.filter(
+                        lote=lote
+                    ).aggregate(total=Sum('cantidad_entregada'))['total'] or 0
+
+                    print(f"📊 Total en entregas parciales: {total_entregado_entregas}/{lote.cantidad_total}")
+
+                    # Actualizar estado según el progreso real
+                    if total_entregado_entregas >= lote.cantidad_total:
+                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
+                        lote.estado = estado_completa
+                        print(f"✅ Lote completado: {estado_completa.nombre}")
+                    elif total_entregado_entregas > 0:
+                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
+                        lote.estado = estado_parcial
+                        print(f"✅ Lote parcial: {estado_parcial.nombre}")
+
+                    lote.save()
+                    print(f"✅ Estado del lote actualizado: {lote.estado.nombre}")
+
+                except EstadoLote.DoesNotExist as e:
+                    print(f"⚠️ Estado de lote no encontrado: {e}")
+                except Exception as e:
+                    print(f"⚠️ Error actualizando estado del lote: {e}")
+
+                # Actualizar estadísticas del resultado
+                resultado['importados'] = importados
+                resultado['cantidad_total_importada'] = cantidad_total_importada
+                resultado['errores_importacion'] = errores_importacion
+
+            # ✅ RESPUESTA EXITOSA PARA MATERIALES NO ÚNICOS
+            return Response({
+                'success': True,
+                'message': f'Importación completada: {importados} lotes de materiales registrados (cantidad total: {cantidad_total_importada})' +
+                           (f' en entrega #{numero_entrega}' if numero_entrega else ''),
+                'resultado': resultado
+            })
+
+        except Exception as e:
+            print(f"💥 ERROR EN MATERIALES NO ÚNICOS: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response({
+                'success': False,
+                'error': f'Error procesando materiales no únicos: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get(self, request, *args, **kwargs):
-        """Obtener plantilla de importación y instrucciones"""
+        """Obtener documentación y plantillas según tipo de material - MEJORADO"""
         return Response({
-            'plantilla': {
-                'columnas_requeridas': ['GPON_SN', 'MAC'],
-                'columnas_opcionales': ['D_SN'],
-                'formato_mac': 'XX:XX:XX:XX:XX:XX (mayúsculas, separado por :)',
-                'formato_gpon': 'Mínimo 8 caracteres (ej: HWTC12345678)',
-                'formato_d_sn': 'Mínimo 6 caracteres si se proporciona (OPCIONAL)',
-                'ejemplo': {
-                    'GPON_SN': 'HWTC12345678',
-                    'MAC': '00:11:22:33:44:55',
-                    'D_SN': 'SN123456789 (OPCIONAL)'
+            'deteccion_automatica': {
+                'descripcion': 'El sistema detecta automáticamente el tipo de material basado en el modelo seleccionado',
+                'flujos': {
+                    'materiales_unicos': 'ONUs y equipos con identificadores únicos (MAC, GPON, etc.)',
+                    'materiales_no_unicos': 'Cables, conectores, materiales por cantidad'
+                }
+            },
+            'materiales_unicos': {
+                'descripcion': 'Para equipos únicos como ONUs',
+                'deteccion': 'Modelo con tipo_material.es_unico = True',
+                'plantilla': {
+                    'columnas_requeridas': ['GPON_SN', 'MAC'],
+                    'columnas_opcionales': ['D_SN'],
+                    'formato_mac': 'XX:XX:XX:XX:XX:XX (mayúsculas, separado por :)',
+                    'formato_gpon': 'Mínimo 8 caracteres (ej: HWTC12345678)',
+                    'formato_d_sn': 'Mínimo 6 caracteres si se proporciona (OPCIONAL)',
+                    'ejemplo': {
+                        'GPON_SN': 'HWTC12345678',
+                        'MAC': '00:11:22:33:44:55',
+                        'D_SN': 'SN123456789 (OPCIONAL)'
+                    }
                 },
                 'item_equipo_info': {
                     'descripcion': 'El código ITEM_EQUIPO se configura una vez para todo el lote',
                     'formato': '6-10 dígitos numéricos',
                     'ejemplo': '1234567890'
+                },
+                'limites': {
+                    'max_filas': 1000,
+                    'validaciones': 'MAC, GPON únicos en sistema y archivo'
+                }
+            },
+            'materiales_no_unicos': {
+                'descripción': 'Para cables, conectores, materiales por cantidad',
+                'deteccion': 'Modelo con tipo_material.es_unico = False',
+                'plantilla': {
+                    'columnas_requeridas': ['CANTIDAD', 'ITEM_EQUIPO'],
+                    'columnas_opcionales': ['OBSERVACIONES', 'LOTE_PROVEEDOR'],
+                    'formato_cantidad': 'Número decimal positivo (ej: 100.5)',
+                    'formato_item_equipo': '6-10 dígitos numéricos por fila',
+                    'ejemplo': {
+                        'CANTIDAD': 100,
+                        'ITEM_EQUIPO': '1234567890',
+                        'OBSERVACIONES': 'Cable fibra óptica monomodo SM',
+                        'LOTE_PROVEEDOR': 'LOTE-2024-001'
+                    }
+                },
+                'limites': {
+                    'max_filas': 100,
+                    'max_cantidad_por_fila': 10000,
+                    'validaciones': 'Cantidad > 0, ITEM_EQUIPO numérico'
                 }
             },
             'formatos_archivo_soportados': [
                 {
-                    'descripcion': 'Archivo completo con D_SN',
-                    'columnas': 'GPON_SN,MAC,D_SN',
-                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55,SN123456789'
+                    'tipo': 'Excel',
+                    'extension': '.xlsx',
+                    'descripcion': 'Formato recomendado'
                 },
                 {
-                    'descripcion': 'Archivo sin D_SN',
-                    'columnas': 'GPON_SN,MAC',
-                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55'
-                },
-                {
-                    'descripcion': 'Archivo con D_SN parcial',
-                    'columnas': 'GPON_SN,MAC,D_SN',
-                    'ejemplo': 'HWTC12345678,00:11:22:33:44:55, (D_SN vacío permitido)'
+                    'tipo': 'CSV',
+                    'extension': '.csv',
+                    'descripcion': 'Separado por comas, codificación UTF-8'
                 }
             ],
-            'instrucciones': [
-                '1. Usar formato Excel (.xlsx) o CSV',
-                '2. Columnas obligatorias: GPON_SN, MAC',
-                '3. Columna opcional: D_SN (puede omitirse o estar vacía)',
-                '4. GPON_SN: mínimo 8 caracteres',
-                '5. MAC: formato XX:XX:XX:XX:XX:XX',
-                '6. D_SN: mínimo 6 caracteres si se proporciona',
-                '7. No dejar filas vacías entre los datos',
-                '8. Verificar que todos los valores sean únicos',
-                '9. Máximo 1000 equipos por importación'
+            'instrucciones_generales': [
+                '1. El sistema detecta automáticamente si el modelo es único o no',
+                '2. Usar la plantilla correcta según el tipo detectado',
+                '3. No dejar filas vacías entre los datos',
+                '4. Verificar que todos los valores sean únicos donde corresponde',
+                '5. El ITEM_EQUIPO puede ser diferente por fila en materiales no únicos',
+                '6. Las observaciones son opcionales pero recomendadas',
+                '7. Validar siempre antes de importar usando validacion=true'
             ]
         })
 
