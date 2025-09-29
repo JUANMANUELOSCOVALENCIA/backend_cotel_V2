@@ -1561,13 +1561,50 @@ class InspeccionLaboratorioSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = InspeccionLaboratorio
-        fields = '__all__'
+        fields = [
+            'id', 'material', 'material_info', 'numero_informe',
+
+            # Las 5 pruebas originales
+            'serie_logica_ok', 'wifi_24_ok', 'wifi_5_ok',
+            'puerto_ethernet_ok', 'puerto_lan_ok',
+
+            # Pruebas adicionales
+            'puerto_catv_ok', 'puerto_telefonia_rf_ok', 'otros_ok',
+
+            # Resultado simple
+            'aprobado',
+
+            # Observaciones
+            'observaciones_tecnico', 'comentarios_adicionales',
+            'fallas_detectadas', 'tecnico_revisor', 'tiempo_inspeccion_minutos',
+
+            # Auditoría
+            'fecha_inspeccion', 'usuario_responsable'
+        ]
+        read_only_fields = ['fecha_inspeccion', 'usuario_responsable']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and request.user:
+            validated_data['usuario_responsable'] = request.user
+        return super().create(validated_data)
 
     def get_material_info(self, obj):
         return {
+            'id': obj.material.id,
             'codigo_interno': obj.material.codigo_interno,
             'mac_address': obj.material.mac_address,
-            'modelo': obj.material.modelo.nombre
+            'gpon_serial': getattr(obj.material, 'gpon_serial', ''),
+            'modelo': {
+                'id': obj.material.modelo.id,
+                'nombre': obj.material.modelo.nombre,
+                'marca': obj.material.modelo.marca.nombre if obj.material.modelo.marca else 'Sin Marca'
+            },
+            'lote': {
+                'id': obj.material.lote.id,
+                'numero_lote': obj.material.lote.numero_lote,
+                'proveedor': obj.material.lote.proveedor.nombre_comercial if obj.material.lote.proveedor else 'Sin Proveedor'
+            }
         }
 
 class ReingresoMaterialSerializer(serializers.Serializer):

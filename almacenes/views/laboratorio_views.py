@@ -19,7 +19,7 @@ from ..models import (
     TipoMaterial, EstadoMaterialONU, TipoIngreso, EstadoLote, HistorialMaterial, InspeccionLaboratorio
 )
 from ..serializers import (
-    LaboratorioOperacionSerializer, MaterialListSerializer
+    LaboratorioOperacionSerializer, MaterialListSerializer, InspeccionLaboratorioSerializer
 )
 
 
@@ -593,73 +593,15 @@ class InspeccionLaboratorioView(APIView):
     basename = 'laboratorio'
 
     def post(self, request):
-        """Registrar inspección detallada"""
-        data = request.data
+        """Registrar inspección detallada (individual o masiva)"""
 
-        try:
-            material = Material.objects.get(id=data['material_id'])
+        # ✅ DETECTAR si es inspección masiva
+        es_masiva = 'materiales_ids' in request.data
 
-            # Crear registro de inspección
-            inspeccion = InspeccionLaboratorio.objects.create(
-                material=material,
-                numero_informe=data['numero_informe'],
-                serie_logica_ok=data.get('serie_logica_ok', True),
-                wifi_24_ok=data.get('wifi_24_ok', True),
-                wifi_5_ok=data.get('wifi_5_ok', True),
-                puerto_ethernet_ok=data.get('puerto_ethernet_ok', True),
-                puerto_lan_ok=data.get('puerto_lan_ok', True),
-                aprobado=data['aprobado'],
-                observaciones_tecnico=data.get('observaciones_tecnico', ''),
-                comentarios_adicionales=data.get('comentarios_adicionales', ''),
-                fallas_detectadas=data.get('fallas_detectadas', []),
-                tecnico_revisor=request.user.codigocotel if request.user else data.get('tecnico_revisor', ''),
-                tiempo_inspeccion_minutos=data.get('tiempo_inspeccion_minutos', 0),
-                usuario_responsable=request.user
-            )
-
-            # Actualizar material
-            material.numero_informe_laboratorio = inspeccion.numero_informe
-            material.observaciones_laboratorio = {
-                'ultima_inspeccion': inspeccion.id,
-                'fallas_detectadas': data.get('fallas_detectadas', []),
-                'observaciones': data.get('observaciones_tecnico', ''),
-                'fecha_inspeccion': inspeccion.fecha_inspeccion.isoformat()
-            }
-
-            # Cambiar estado según resultado
-            if data['aprobado']:
-                estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
-                material.estado_onu = estado_disponible
-            else:
-                estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
-                material.estado_onu = estado_defectuoso
-
-            material.fecha_retorno_laboratorio = timezone.now()
-            material.save()
-
-            # Crear historial
-            HistorialMaterial.objects.create(
-                material=material,
-                estado_anterior='En Laboratorio',
-                estado_nuevo=material.estado_display,
-                almacen_anterior=material.almacen_actual,
-                almacen_nuevo=material.almacen_actual,
-                motivo=f'Inspección laboratorio: {inspeccion.numero_informe}',
-                observaciones=f"Resultado: {'APROBADO' if data['aprobado'] else 'RECHAZADO'}. {data.get('observaciones_tecnico', '')}",
-                usuario_responsable=request.user
-            )
-
-            return Response({
-                'success': True,
-                'message': f'Inspección registrada: {inspeccion.numero_informe}',
-                'inspeccion_id': inspeccion.id,
-                'material_estado': material.estado_display
-            })
-
-        except Material.DoesNotExist:
-            return Response({'error': 'Material no encontrado'}, status=404)
-        except Exception as e:
-            return Response({'error': str(e)}, status=500)
+        if es_masiva:
+            return self._registrar_inspeccion_masiva(request)
+        else:
+            return self._registrar_inspeccion_individual(request)
 
     def get(self, request):
         """Obtener inspecciones de laboratorio"""
@@ -732,3 +674,178 @@ class InspeccionLaboratorioView(APIView):
             'inspecciones': data,
             'total': len(data)
         })
+
+    def _registrar_inspeccion_individual(self, request):
+        """Método original para inspección individual"""
+        serializer = InspeccionLaboratorioSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                inspeccion = serializer.save()
+
+                # Actualizar material según resultado
+                material = inspeccion.material
+
+                if inspeccion.aprobado:
+                    estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+                    material.estado_onu = estado_disponible
+                else:
+                    estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+                    material.estado_onu = estado_defectuoso
+
+                material.fecha_retorno_laboratorio = timezone.now()
+                material.observaciones_laboratorio = {
+                    'ultima_inspeccion': inspeccion.id,
+                    'numero_informe': inspeccion.numero_informe,
+                    'fecha_inspeccion': inspeccion.fecha_inspeccion.isoformat(),
+                    'tecnico_revisor': inspeccion.tecnico_revisor,
+                    'fallas_detectadas': inspeccion.fallas_detectadas,
+                    'observaciones': inspeccion.observaciones_tecnico
+                }
+                material.save()
+
+                # Crear registro en historial
+                HistorialMaterial.objects.create(
+                    material=material,
+                    estado_anterior='En Laboratorio',
+                    estado_nuevo=material.estado_display,
+                    almacen_anterior=material.almacen_actual,
+                    almacen_nuevo=material.almacen_actual,
+                    motivo=f'Inspección laboratorio: {inspeccion.numero_informe}',
+                    observaciones=f"Resultado: {'APROBADO' if inspeccion.aprobado else 'RECHAZADO'}. "
+                                  f"{inspeccion.observaciones_tecnico}",
+                    usuario_responsable=request.user
+                )
+
+            response_serializer = InspeccionLaboratorioSerializer(inspeccion)
+
+            return Response({
+                'success': True,
+                'message': f'Inspección registrada: {inspeccion.numero_informe}',
+                'inspeccion': response_serializer.data,
+                'material_estado_actualizado': material.estado_display
+            })
+
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': f'Error al procesar inspección: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _registrar_inspeccion_masiva(self, request):
+        """Método para inspección masiva"""
+        materiales_ids = request.data.get('materiales_ids', [])
+
+        if not materiales_ids or len(materiales_ids) < 2:
+            return Response({
+                'success': False,
+                'error': 'Se requieren al menos 2 materiales para inspección masiva'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Verificar que todos los materiales estén en laboratorio
+            tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
+            estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
+
+            materiales = Material.objects.filter(
+                id__in=materiales_ids,
+                tipo_material=tipo_onu,
+                estado_onu=estado_laboratorio
+            )
+
+            if materiales.count() != len(materiales_ids):
+                return Response({
+                    'success': False,
+                    'error': 'Algunos materiales no están disponibles para inspección'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Generar número de informe base
+            fecha_hoy = timezone.now().strftime('%Y%m%d')
+            numero_informe_base = f"INF-MASIVA-{fecha_hoy}"
+
+            # Crear inspecciones para todos los materiales
+            inspecciones_creadas = []
+
+            with transaction.atomic():
+                for i, material in enumerate(materiales, 1):
+                    # Crear datos de inspección individual
+                    inspeccion_data = {
+                        'material': material,
+                        'numero_informe': f"{numero_informe_base}-{i:03d}",
+                        'serie_logica_ok': request.data.get('serie_logica_ok', True),
+                        'wifi_24_ok': request.data.get('wifi_24_ok', True),
+                        'wifi_5_ok': request.data.get('wifi_5_ok', True),
+                        'puerto_ethernet_ok': request.data.get('puerto_ethernet_ok', True),
+                        'puerto_lan_ok': request.data.get('puerto_lan_ok', True),
+                        'puerto_catv_ok': request.data.get('puerto_catv_ok', True),
+                        'puerto_telefonia_rf_ok': request.data.get('puerto_telefonia_rf_ok', True),
+                        'otros_ok': request.data.get('otros_ok', True),
+                        'aprobado': request.data.get('aprobado', True),
+                        'observaciones_tecnico': request.data.get('observaciones_tecnico', ''),
+                        'comentarios_adicionales': request.data.get('comentarios_adicionales', ''),
+                        'fallas_detectadas': request.data.get('fallas_detectadas', []),
+                        'tecnico_revisor': request.data.get('tecnico_revisor', ''),
+                        'tiempo_inspeccion_minutos': request.data.get('tiempo_inspeccion_minutos', 5),
+                        'usuario_responsable': request.user
+                    }
+
+                    # Crear inspección
+                    inspeccion = InspeccionLaboratorio.objects.create(**inspeccion_data)
+                    inspecciones_creadas.append(inspeccion)
+
+                    # Actualizar estado del material
+                    if inspeccion.aprobado:
+                        estado_disponible = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+                        material.estado_onu = estado_disponible
+                    else:
+                        estado_defectuoso = EstadoMaterialONU.objects.get(codigo='DEFECTUOSO', activo=True)
+                        material.estado_onu = estado_defectuoso
+
+                    material.fecha_retorno_laboratorio = timezone.now()
+                    material.observaciones_laboratorio = {
+                        'ultima_inspeccion': inspeccion.id,
+                        'numero_informe': inspeccion.numero_informe,
+                        'fecha_inspeccion': inspeccion.fecha_inspeccion.isoformat(),
+                        'tecnico_revisor': inspeccion.tecnico_revisor,
+                        'tipo_inspeccion': 'MASIVA',
+                        'fallas_detectadas': inspeccion.fallas_detectadas,
+                        'observaciones': inspeccion.observaciones_tecnico
+                    }
+                    material.save()
+
+                    # Crear registro en historial
+                    HistorialMaterial.objects.create(
+                        material=material,
+                        estado_anterior='En Laboratorio',
+                        estado_nuevo=material.estado_display,
+                        almacen_anterior=material.almacen_actual,
+                        almacen_nuevo=material.almacen_actual,
+                        motivo=f'Inspección masiva: {inspeccion.numero_informe}',
+                        observaciones=f"Resultado: {'APROBADO' if inspeccion.aprobado else 'RECHAZADO'} (Masiva). "
+                                      f"{inspeccion.observaciones_tecnico}",
+                        usuario_responsable=request.user
+                    )
+
+            return Response({
+                'success': True,
+                'message': f'Inspección masiva completada: {len(inspecciones_creadas)} equipos procesados',
+                'inspecciones_creadas': len(inspecciones_creadas),
+                'numero_informe_base': numero_informe_base,
+                'resultado_general': 'APROBADO' if request.data.get('aprobado', True) else 'RECHAZADO',
+                'materiales_procesados': [material.codigo_interno for material in materiales]
+            })
+
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': f'Error en inspección masiva: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

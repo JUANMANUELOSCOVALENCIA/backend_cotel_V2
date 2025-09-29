@@ -1143,6 +1143,10 @@ class InspeccionLaboratorio(models.Model):
     puerto_ethernet_ok = models.BooleanField(help_text="Puerto Ethernet OK")
     puerto_lan_ok = models.BooleanField(help_text="Puerto LAN OK")
 
+    puerto_catv_ok = models.BooleanField(default=True, help_text='Puerto CATV (TV por cable) funciona')
+    puerto_telefonia_rf_ok = models.BooleanField(default=True, help_text='Puerto de Telefonía RF (POTS/FXS) funciona')
+    otros_ok = models.BooleanField(default=True, help_text='Otras pruebas adicionales OK')
+
     # Resultado general
     aprobado = models.BooleanField()
 
