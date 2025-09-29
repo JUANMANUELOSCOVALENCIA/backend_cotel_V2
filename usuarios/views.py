@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import timedelta
 from django.contrib.auth import authenticate
 from django.utils import timezone
 from django.db.models import Q
@@ -9,11 +10,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.decorators import action
-from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
+from rest_framework.response import Response
 
 from .models import (
     Empleado_fdw, Usuario, Permission, Roles, AuditLog,
@@ -25,8 +26,6 @@ from .serializers import (
     EmpleadoDisponibleSerializer, MigrarEmpleadoSerializer, ResetPasswordSerializer,
     AuditLogSerializer
 )
-from .permissions import GenericRolePermission
-
 
 class StandardPagination(PageNumberPagination):
     """Paginación estándar"""
@@ -154,7 +153,7 @@ class MigrarUsuarioView(APIView):
 
 
 class LoginJWTView(APIView):
-    """Vista de login con auditoría y control de intentos"""
+    """Vista de login SIN bloqueo automático"""
 
     def post(self, request, *args, **kwargs):
         codigocotel = request.data.get("codigocotel")
@@ -174,13 +173,6 @@ class LoginJWTView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Verificar si está bloqueado
-        if usuario.esta_bloqueado:
-            return Response(
-                {"error": "Usuario bloqueado temporalmente por múltiples intentos fallidos."},
-                status=status.HTTP_423_LOCKED
-            )
-
         # Verificar si está eliminado
         if usuario.eliminado:
             return Response(
@@ -192,17 +184,13 @@ class LoginJWTView(APIView):
         user = authenticate(request, username=codigocotel, password=password)
 
         if not user:
-            # Incrementar intentos fallidos
-            usuario.incrementar_intentos_fallidos()
-
-            # Log de intento fallido
+            # Log de intento fallido (SIN incrementar intentos ni bloquear)
             crear_log_auditoria(
                 usuario=usuario,
                 accion='LOGIN',
                 objeto=usuario,
                 detalles={
                     'exitoso': False,
-                    'intento_numero': usuario.intentos_login_fallidos,
                     'razon': 'credenciales_invalidas'
                 },
                 ip_address=get_client_ip(request),
@@ -215,9 +203,9 @@ class LoginJWTView(APIView):
             )
 
         # Login exitoso
-        usuario.reset_intentos_fallidos()
         usuario.ultimo_login_ip = get_client_ip(request)
-        usuario.save()
+        usuario.last_login = timezone.now()
+        usuario.save(update_fields=['ultimo_login_ip','last_login'])
 
         # Generar tokens
         refresh = RefreshToken.for_user(user)
@@ -271,7 +259,6 @@ class LoginJWTView(APIView):
                 ).values("recurso", "accion")) if user.rol else []
             }
         }, status=status.HTTP_200_OK)
-
 
 class ChangePasswordView(APIView):
     """Vista para cambio de contraseña"""
@@ -344,10 +331,10 @@ class AuditLogViewSet(ModelViewSet):
     """ViewSet para consulta de logs de auditoría"""
     queryset = AuditLog.objects.all().select_related('usuario')
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
+    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
     pagination_class = StandardPagination
     basename = 'logs'
-    http_method_names = ['get']  # Solo lectura
+    http_method_names = ['get']
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['accion', 'app_label', 'model_name', 'usuario']
     search_fields = ['objeto_representacion', 'detalles']
@@ -358,7 +345,6 @@ class AuditLogViewSet(ModelViewSet):
         """Filtros adicionales"""
         queryset = super().get_queryset()
 
-        # Filtro por rango de fechas
         fecha_desde = self.request.query_params.get('fecha_desde', None)
         fecha_hasta = self.request.query_params.get('fecha_hasta', None)
 
@@ -367,7 +353,6 @@ class AuditLogViewSet(ModelViewSet):
         if fecha_hasta:
             queryset = queryset.filter(fecha_hora__lte=fecha_hasta)
 
-        # Filtro por IP
         ip = self.request.query_params.get('ip', None)
         if ip:
             queryset = queryset.filter(ip_address=ip)
@@ -382,12 +367,10 @@ class AuditLogViewSet(ModelViewSet):
 
         total_logs = self.get_queryset().count()
 
-        # Por acción
         por_accion = dict(self.get_queryset().values_list('accion').annotate(
             count=Count('accion')
         ))
 
-        # Últimas 24 horas
         hace_24h = timezone.now() - timedelta(hours=24)
         logs_24h = self.get_queryset().filter(fecha_hora__gte=hace_24h).count()
 
@@ -397,12 +380,11 @@ class AuditLogViewSet(ModelViewSet):
             'por_accion': por_accion
         })
 
-
 class PermissionViewSet(ModelViewSet):
     """ViewSet para gestión de permisos"""
     queryset = Permission.objects.all().order_by('recurso', 'accion')
     serializer_class = PermissionSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
+    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
     pagination_class = StandardPagination
     basename = 'permisos'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -416,7 +398,6 @@ class PermissionViewSet(ModelViewSet):
         if not permission.esta_en_uso():
             permission.delete(user=request.user)
 
-            # Log de auditoría
             crear_log_auditoria(
                 usuario=request.user,
                 accion='DELETE',
@@ -449,7 +430,6 @@ class PermissionViewSet(ModelViewSet):
 
         permission.restore()
 
-        # Log de auditoría
         crear_log_auditoria(
             usuario=request.user,
             accion='RESTORE',
@@ -475,12 +455,11 @@ class PermissionViewSet(ModelViewSet):
         """Listar acciones válidas"""
         return Response(['crear', 'leer', 'actualizar', 'eliminar'])
 
-
 class RolesViewSet(ModelViewSet):
     """ViewSet para gestión de roles"""
     queryset = Roles.objects.all().select_related('creado_por').prefetch_related('permisos')
     serializer_class = RolesSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
+    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
     pagination_class = StandardPagination
     basename = 'roles'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -492,7 +471,6 @@ class RolesViewSet(ModelViewSet):
         """Filtros adicionales"""
         queryset = super().get_queryset()
 
-        # Filtro por roles con/sin usuarios
         con_usuarios = self.request.query_params.get('con_usuarios', None)
         if con_usuarios is not None:
             if con_usuarios.lower() == 'true':
@@ -509,7 +487,6 @@ class RolesViewSet(ModelViewSet):
         if rol.puede_eliminar():
             rol.delete(user=request.user)
 
-            # Log de auditoría
             crear_log_auditoria(
                 usuario=request.user,
                 accion='DELETE',
@@ -547,7 +524,6 @@ class RolesViewSet(ModelViewSet):
 
         rol.restore()
 
-        # Log de auditoría
         crear_log_auditoria(
             usuario=request.user,
             accion='RESTORE',
@@ -601,7 +577,6 @@ class RolesViewSet(ModelViewSet):
                     activo=True, eliminado=False
                 ))
 
-                # Log de auditoría
                 crear_log_auditoria(
                     usuario=request.user,
                     accion='CREATE',
@@ -623,10 +598,9 @@ class RolesViewSet(ModelViewSet):
         serializer = self.get_serializer(nuevo_rol)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-
 class UsuarioViewSet(ModelViewSet):
     """ViewSet para gestión de usuarios"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
+    permission_classes = [IsAuthenticated]
     pagination_class = StandardPagination
     basename = 'usuarios'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -1246,66 +1220,6 @@ class UsuarioPerfilView(APIView):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
-class EstadisticasUsuariosView(APIView):
-    """Vista para estadísticas generales del sistema"""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, *args, **kwargs):
-        """Obtener estadísticas del sistema"""
-        try:
-            # Estadísticas de usuarios
-            total_usuarios = Usuario.objects.count()
-            usuarios_activos = Usuario.objects.activos().count()
-            usuarios_manuales = Usuario.objects.manuales().count()
-            usuarios_migrados = Usuario.objects.migrados().count()
-            usuarios_bloqueados = Usuario.objects.bloqueados().count()
-            usuarios_password_pendiente = Usuario.objects.password_pendiente().count()
-
-            # Estadísticas de roles
-            total_roles = Roles.objects.count()
-            roles_activos = Roles.objects.filter(activo=True).count()
-
-            # Estadísticas de permisos
-            total_permisos = Permission.objects.count()
-            permisos_activos = Permission.objects.filter(activo=True).count()
-
-            # Estadísticas de logs (últimos 30 días)
-            hace_30_dias = timezone.now() - timezone.timedelta(days=30)
-            logs_30_dias = AuditLog.objects.filter(fecha_hora__gte=hace_30_dias).count()
-
-            return Response({
-                "usuarios": {
-                    "total": total_usuarios,
-                    "activos": usuarios_activos,
-                    "inactivos": total_usuarios - usuarios_activos,
-                    "manuales": usuarios_manuales,
-                    "migrados": usuarios_migrados,
-                    "bloqueados": usuarios_bloqueados,
-                    "password_pendiente": usuarios_password_pendiente
-                },
-                "roles": {
-                    "total": total_roles,
-                    "activos": roles_activos,
-                    "inactivos": total_roles - roles_activos
-                },
-                "permisos": {
-                    "total": total_permisos,
-                    "activos": permisos_activos,
-                    "inactivos": total_permisos - permisos_activos
-                },
-                "actividad": {
-                    "logs_30_dias": logs_30_dias
-                }
-            })
-
-        except Exception as e:
-            return Response(
-                {"error": f"Error al obtener estadísticas: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
 class ValidarCodigoCotelView(APIView):
     """Vista para validar disponibilidad de código COTEL"""
     permission_classes = [IsAuthenticated]
@@ -1519,7 +1433,6 @@ class EstadisticasUsuariosView(APIView):
                     "eliminados": usuarios_eliminados,  # NUEVO
                     "manuales": usuarios_manuales,
                     "migrados": usuarios_migrados,
-                    "bloqueados": usuarios_bloqueados,
                     "password_pendiente": usuarios_password_pendiente
                 },
                 "eliminados": {  # NUEVA SECCIÓN

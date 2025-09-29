@@ -12,7 +12,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from contratos.models import TipoServicio
 from contratos.serializers import TipoServicioSerializer
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
     EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,Almacen, Proveedor, Marca, Modelo, Lote, Componente,SectorSolicitante
@@ -31,8 +30,7 @@ class TipoIngresoViewSet(viewsets.ModelViewSet):
     """ViewSet para tipos de ingreso"""
     queryset = TipoIngreso.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoIngresoSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'tipos-ingreso'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'descripcion']
@@ -64,8 +62,7 @@ class EstadoLoteViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de lote"""
     queryset = EstadoLote.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoLoteSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'estados-lote'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['es_final', 'activo']
@@ -92,8 +89,7 @@ class EstadoTraspasoViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de traspaso"""
     queryset = EstadoTraspaso.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoTraspasoSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'estados-traspaso'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['es_final', 'activo']
@@ -114,8 +110,7 @@ class TipoMaterialViewSet(viewsets.ModelViewSet):
     queryset = TipoMaterial.objects.all().select_related('unidad_medida_default', 'created_by').order_by('orden',
                                                                                                          'nombre')
     serializer_class = TipoMaterialSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'tipos-material'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['es_unico', 'requiere_inspeccion_inicial', 'activo', 'unidad_medida_default']
@@ -193,8 +188,7 @@ class UnidadMedidaViewSet(viewsets.ModelViewSet):
     """ViewSet para unidades de medida"""
     queryset = UnidadMedida.objects.all().order_by('orden', 'nombre')
     serializer_class = UnidadMedidaSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'unidades-medida'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'simbolo', 'descripcion']
@@ -226,8 +220,7 @@ class EstadoMaterialONUViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de material ONU"""
     queryset = EstadoMaterialONU.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialONUSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'estados-material-onu'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['permite_asignacion', 'permite_traspaso', 'activo']
@@ -274,8 +267,7 @@ class EstadoMaterialGeneralViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de material general"""
     queryset = EstadoMaterialGeneral.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialGeneralSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'estados-material-general'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['permite_consumo', 'permite_traspaso', 'activo']
@@ -309,8 +301,7 @@ class TipoAlmacenViewSet(viewsets.ModelViewSet):
     """ViewSet para tipos de almacén"""
     queryset = TipoAlmacen.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoAlmacenSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'tipos-almacen'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'descripcion']

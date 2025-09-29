@@ -9,7 +9,6 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import filters
 
-from usuarios.permissions import GenericRolePermission
 from ..models import SectorSolicitante, Material, EstadoMaterialONU, TipoMaterial
 from ..serializers import (
     SectorSolicitanteSerializer, DevolucionSectorSerializer,
@@ -21,8 +20,7 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
     """Gestión de sectores solicitantes"""
     queryset = SectorSolicitante.objects.all()
     serializer_class = SectorSolicitanteSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'sectores-solicitantes'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre']
@@ -58,8 +56,7 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
 
 class DevolucionSectorView(APIView):
     """Devolver materiales defectuosos al sector solicitante"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Obtener materiales defectuosos para devolver"""
@@ -93,8 +90,7 @@ class DevolucionSectorView(APIView):
 
 class ReingresoSectorView(APIView):
     """Reingresar nuevos equipos desde sector solicitante"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Obtener materiales devueltos al sector"""

@@ -18,7 +18,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
 
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     Lote, LoteDetalle, EntregaParcialLote, Material, Almacen,
     TipoIngreso, EstadoLote, TipoMaterial, EstadoMaterialONU, Modelo,
@@ -37,8 +36,7 @@ class LoteViewSet(viewsets.ModelViewSet):
         'proveedor', 'almacen_destino', 'tipo_servicio', 'created_by',
         'tipo_ingreso', 'estado'
     ).prefetch_related('detalles__modelo__marca')
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'lotes'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
@@ -784,9 +782,8 @@ class LoteViewSet(viewsets.ModelViewSet):
 
 class ImportacionMasivaView(APIView):
     """View para importación masiva de materiales desde Excel/CSV - SOPORTE DUAL"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
-    basename = 'lotes'
 
     def post(self, request, *args, **kwargs):
         """Procesar archivo de importación masiva - DETECCIÓN AUTOMÁTICA DE TIPO"""
@@ -1776,8 +1773,7 @@ class LoteDetalleViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de detalles de lotes"""
     queryset = LoteDetalle.objects.all().select_related('lote', 'modelo__marca')
     serializer_class = LoteDetalleSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'lote-detalles'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['lote', 'modelo']

@@ -9,9 +9,7 @@ from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-import json
 
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     Almacen, Proveedor, Lote, Material, TraspasoAlmacen,
     TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral,
@@ -23,8 +21,7 @@ from ..models import (
 
 class EstadisticasGeneralesView(APIView):
     """Vista para estadísticas generales del sistema completo"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Dashboard ejecutivo con todas las métricas importantes"""
@@ -157,8 +154,7 @@ class EstadisticasGeneralesView(APIView):
 
 class DashboardView(APIView):
     """Dashboard operativo con métricas en tiempo real"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Métricas operativas del día/semana"""
@@ -281,8 +277,7 @@ class DashboardView(APIView):
 
 class ReporteInventarioView(APIView):
     """Reporte detallado de inventario"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated, ]
 
     def get(self, request):
         """Reporte completo de inventario por almacén y tipo"""
@@ -393,8 +388,7 @@ class ReporteInventarioView(APIView):
 
 class ReporteMovimientosView(APIView):
     """Reporte de movimientos y trazabilidad"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Reporte de movimientos por período"""
@@ -461,8 +455,7 @@ class ReporteMovimientosView(APIView):
 
 class ReporteGarantiasView(APIView):
     """Reporte de garantías y vencimientos"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Reporte de garantías próximas a vencer"""
@@ -535,8 +528,7 @@ class ReporteGarantiasView(APIView):
 
 class ReporteEficienciaView(APIView):
     """Reporte de eficiencia y KPIs operativos"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'almacenes'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """KPIs de eficiencia operativa"""

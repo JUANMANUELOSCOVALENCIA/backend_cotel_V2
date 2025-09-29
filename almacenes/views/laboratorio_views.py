@@ -12,7 +12,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     Material, Lote,
     # Modelos de choices (antes TextChoices)
@@ -25,8 +24,7 @@ from ..serializers import (
 
 class LaboratorioView(APIView):
     """View principal para operaciones de laboratorio"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'laboratorio'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Dashboard de laboratorio con estadísticas"""
@@ -132,8 +130,7 @@ class LaboratorioView(APIView):
 
 class LaboratorioMasivoView(APIView):
     """View para operaciones masivas de laboratorio"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'laboratorio'
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """Operaciones masivas en laboratorio"""
@@ -373,8 +370,7 @@ class LaboratorioMasivoView(APIView):
 
 class LaboratorioConsultaView(APIView):
     """View para consultas específicas de laboratorio"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'laboratorio'
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Diferentes tipos de consultas de laboratorio"""
@@ -589,8 +585,7 @@ class LaboratorioConsultaView(APIView):
 
 class InspeccionLaboratorioView(APIView):
     """View para inspecciones detalladas de laboratorio"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'laboratorio'
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """Registrar inspección detallada (individual o masiva)"""

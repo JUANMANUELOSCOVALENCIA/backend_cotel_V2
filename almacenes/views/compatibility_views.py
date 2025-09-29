@@ -9,7 +9,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     Marca,Modelo,Componente, ModeloComponente
 )
@@ -24,8 +23,7 @@ class MarcaViewSet(viewsets.ModelViewSet):
     """ViewSet actualizado para marcas"""
     queryset = Marca.objects.all()
     serializer_class = MarcaSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'marcas'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'descripcion']
@@ -66,8 +64,7 @@ class ModeloViewSet(viewsets.ModelViewSet):
     """ViewSet actualizado para modelos con soporte de materiales múltiples"""
     queryset = Modelo.objects.all().select_related('marca', 'tipo_material', 'unidad_medida')
     serializer_class = ModeloSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'modelos'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'marca__nombre', 'codigo_modelo']
@@ -246,8 +243,7 @@ class ComponenteViewSet(viewsets.ModelViewSet):
     """ViewSet actualizado para componentes"""
     queryset = Componente.objects.all()
     serializer_class = ComponenteSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'componentes'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'descripcion']
@@ -347,8 +343,7 @@ class ModeloComponenteViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de relaciones modelo-componente"""
     queryset = ModeloComponente.objects.all().select_related('modelo__marca', 'componente')
     serializer_class = ModeloComponenteSerializer
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'modelo-componentes'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['modelo', 'componente']

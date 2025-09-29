@@ -13,7 +13,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
-from usuarios.permissions import GenericRolePermission
 from ..models import (
     TraspasoAlmacen, TraspasoMaterial,
     Material, HistorialMaterial,
@@ -31,8 +30,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
     queryset = TraspasoAlmacen.objects.all().select_related(
         'almacen_origen', 'almacen_destino', 'usuario_envio', 'usuario_recepcion', 'estado'
     ).prefetch_related('materiales__material')
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'traspasos'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [

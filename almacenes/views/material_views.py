@@ -11,7 +11,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import rest_framework as django_filters
 from rest_framework.views import APIView
 
-from usuarios.permissions import GenericRolePermission
 from .. import models
 from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, Modelo, InspeccionLaboratorio, \
     HistorialMaterial, TipoIngreso
@@ -96,8 +95,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
     ).order_by('-created_at')
 
     pagination_class = CustomPageNumberPagination
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'materiales'
+    permission_classes = [IsAuthenticated]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = MaterialFilter
@@ -381,8 +379,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
 
 class ReingresoMaterialView(APIView):
     """View para manejar reingresos de materiales de reposición"""
-    permission_classes = [IsAuthenticated, GenericRolePermission]
-    basename = 'materiales'
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """Registrar reingreso de material de reposición (desde devolución)"""
