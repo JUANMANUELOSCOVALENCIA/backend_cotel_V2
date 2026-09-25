@@ -26,6 +26,7 @@ def get_user_agent(request):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.CharField(source='usuario.nombre_completo', read_only=True)
+    usuario_codigo = serializers.IntegerField(source='usuario.codigocotel', read_only=True)
     accion_display = serializers.CharField(source='get_accion_display', read_only=True)
     fecha_hora_formateada = serializers.SerializerMethodField()
     es_eliminacion = serializers.SerializerMethodField()  # NUEVO
@@ -34,7 +35,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AuditLog
         fields = [
-            'id', 'usuario', 'usuario_nombre', 'accion', 'accion_display',
+            'id', 'usuario', 'usuario_nombre', 'usuario_codigo', 'accion', 'accion_display',
             'accion_personalizada', 'app_label', 'model_name', 'object_id',
             'objeto_representacion', 'detalles', 'ip_address', 'user_agent',
             'fecha_hora', 'fecha_hora_formateada', 'es_eliminacion', 'es_restauracion'
