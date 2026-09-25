@@ -236,6 +236,7 @@ class LoginJWTView(APIView):
                     "codigocotel": user.codigocotel,
                     "password_changed": user.password_changed,
                     "password_reset_required": user.password_reset_required,
+                    "is_superuser": user.is_superuser,
                     "rol": user.rol.nombre if user.rol else None,
                     "permisos": list(user.rol.permisos.filter(
                         activo=True, eliminado=False
@@ -253,6 +254,7 @@ class LoginJWTView(APIView):
                 "codigocotel": user.codigocotel,
                 "password_changed": user.password_changed,
                 "password_reset_required": user.password_reset_required,
+                "is_superuser": user.is_superuser,
                 "rol": user.rol.nombre if user.rol else None,
                 "permisos": list(user.rol.permisos.filter(
                     activo=True, eliminado=False
@@ -348,16 +350,32 @@ class AuditLogViewSet(ModelViewSet):
         fecha_desde = self.request.query_params.get('fecha_desde', None)
         fecha_hasta = self.request.query_params.get('fecha_hasta', None)
 
+        # Filtrar por fecha (día completo, incluye el día "hasta")
         if fecha_desde:
-            queryset = queryset.filter(fecha_hora__gte=fecha_desde)
+            queryset = queryset.filter(fecha_hora__date__gte=fecha_desde)
         if fecha_hasta:
-            queryset = queryset.filter(fecha_hora__lte=fecha_hasta)
+            queryset = queryset.filter(fecha_hora__date__lte=fecha_hasta)
 
         ip = self.request.query_params.get('ip', None)
         if ip:
             queryset = queryset.filter(ip_address=ip)
 
+        # Filtrar por código COTEL del usuario que realizó la acción
+        codigocotel = self.request.query_params.get('codigocotel', None)
+        if codigocotel and str(codigocotel).isdigit():
+            queryset = queryset.filter(usuario__codigocotel=int(codigocotel))
+
         return queryset
+
+    @action(detail=False, methods=['get'])
+    def exportar(self, request):
+        """Devuelve todos los logs filtrados (sin paginar) para exportar a PDF. Máximo 5000."""
+        queryset = self.filter_queryset(self.get_queryset())[:5000]
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            'count': len(serializer.data),
+            'results': serializer.data
+        })
 
     @action(detail=False, methods=['get'])
     def estadisticas(self, request):

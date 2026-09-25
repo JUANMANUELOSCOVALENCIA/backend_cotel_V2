@@ -93,8 +93,8 @@ DATABASES = {
         'ENGINE':'django.db.backends.postgresql',
         'NAME': 'manager_cotel',
         'USER': 'bender',
-        'PASSWORD': '150501',
-        'HOST': '100.125.128.16',  # O la dirección de tu servidor PostgreSQL
+        'PASSWORD': 'Lavaca356',
+        'HOST': '100.117.101.43',  # O la dirección de tu servidor PostgreSQL
         'PORT': '5432',  # Puerto por defecto de PostgreSQL
     }
 }
