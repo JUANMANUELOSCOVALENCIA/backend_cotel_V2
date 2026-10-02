@@ -70,7 +70,9 @@ class PermissionSerializer(serializers.ModelSerializer):
         read_only_fields = ['fecha_creacion', 'fecha_modificacion']
 
     def get_esta_en_uso(self, obj):
-        return obj.esta_en_uso()
+        # Si la vista ya lo calculó en la consulta (annotate), no se hace otra query
+        en_uso = getattr(obj, '_en_uso', None)
+        return obj.esta_en_uso() if en_uso is None else en_uso
 
     def validate_recurso(self, value):
         if not value or not value.strip():
@@ -163,8 +165,8 @@ class RolesSerializer(serializers.ModelSerializer):
         required=False,
         allow_empty=True
     )
-    cantidad_usuarios = serializers.ReadOnlyField()
-    cantidad_permisos = serializers.ReadOnlyField()
+    cantidad_usuarios = serializers.SerializerMethodField()
+    cantidad_permisos = serializers.SerializerMethodField()
     puede_eliminar = serializers.SerializerMethodField()
     creado_por_nombre = serializers.CharField(source='creado_por.nombre_completo', read_only=True)
 
@@ -178,8 +180,18 @@ class RolesSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['fecha_creacion', 'fecha_modificacion', 'es_sistema']
 
+    # Los valores _cant_* / _tiene_usuarios vienen precalculados desde RolesViewSet.get_queryset
+    def get_cantidad_usuarios(self, obj):
+        v = getattr(obj, '_cant_usuarios', None)
+        return obj.cantidad_usuarios if v is None else v
+
+    def get_cantidad_permisos(self, obj):
+        v = getattr(obj, '_cant_permisos', None)
+        return obj.cantidad_permisos if v is None else v
+
     def get_puede_eliminar(self, obj):
-        return obj.puede_eliminar()
+        v = getattr(obj, '_tiene_usuarios', None)
+        return obj.puede_eliminar() if v is None else (not obj.es_sistema and not v)
 
     def validate_nombre(self, value):
         if not value or not value.strip():
@@ -273,6 +285,9 @@ class RolesSerializer(serializers.ModelSerializer):
                     user_agent=get_user_agent(request)
                 )
 
+            # Los contadores precalculados ya no son válidos tras editar
+            for attr in ('_cant_usuarios', '_cant_permisos', '_tiene_usuarios'):
+                instance.__dict__.pop(attr, None)
             return instance
 
 
@@ -485,7 +500,7 @@ class UsuarioManualSerializer(serializers.ModelSerializer):
                 apellidomaterno=validated_data['apellidomaterno'],
                 nombres=validated_data['nombres'],
                 estadoempleado=0,
-                fechaingreso=timezone.now().date(),
+                fechaingreso=timezone.localdate(),
                 rol=validated_data['rol'],
                 password_changed=False,
                 password_reset_required=False,
@@ -744,15 +759,22 @@ class ChangePasswordSerializer(serializers.Serializer):
     confirm_password = serializers.CharField(required=True)
 
     def validate_new_password(self, value):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        # Con el usuario, Django también revisa que no se parezca a su código o nombre
         try:
-            validate_password(value)
+            validate_password(value, user=user if getattr(user, 'is_authenticated', False) else None)
         except DjangoValidationError as e:
             raise serializers.ValidationError(list(e.messages))
+        if user is not None and getattr(user, 'codigocotel', None) and str(user.codigocotel) in value:
+            raise serializers.ValidationError('La contraseña no puede contener tu código COTEL.')
         return value
 
     def validate(self, data):
         if data['new_password'] != data['confirm_password']:
-            raise serializers.ValidationError("Las contraseñas no coinciden")
+            raise serializers.ValidationError({'confirm_password': 'Las contraseñas no coinciden.'})
+        if data['new_password'] == data['old_password']:
+            raise serializers.ValidationError({'new_password': 'La nueva contraseña debe ser distinta de la actual.'})
         return data
 
     def save(self, user):
@@ -877,4 +899,4 @@ class EmpleadoSerializer(serializers.ModelSerializer):
                                 "Solo los superusuarios pueden realizar eliminaciones definitivas"
                             )
 
-                    return data
+                    return data

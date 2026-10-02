@@ -7,9 +7,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
 from rest_framework import filters
 
 from ..models import SectorSolicitante, Material, EstadoMaterialONU, TipoMaterial
+from ..optimizaciones import optimizar_sectores
 from ..serializers import (
     SectorSolicitanteSerializer, DevolucionSectorSerializer,
     ReingresoSectorSerializer, MaterialListSerializer
@@ -20,7 +22,8 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
     """Gestión de sectores solicitantes"""
     queryset = SectorSolicitante.objects.all()
     serializer_class = SectorSolicitanteSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre']
@@ -28,8 +31,10 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         if self.request.query_params.get('incluir_inactivos') == 'true':
-            return SectorSolicitante.objects.all()
-        return SectorSolicitante.objects.filter(activo=True)
+            qs = SectorSolicitante.objects.all()
+        else:
+            qs = SectorSolicitante.objects.filter(activo=True)
+        return optimizar_sectores(qs) if self.action == 'list' else qs
 
     @action(detail=True, methods=['get'])
     def materiales_por_estado(self, request, pk=None):
@@ -56,7 +61,9 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
 
 class DevolucionSectorView(APIView):
     """Devolver materiales defectuosos al sector solicitante"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'materiales'
+    accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}
 
     def get(self, request):
         """Obtener materiales defectuosos para devolver"""
@@ -90,7 +97,9 @@ class DevolucionSectorView(APIView):
 
 class ReingresoSectorView(APIView):
     """Reingresar nuevos equipos desde sector solicitante"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'materiales'
+    accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}
 
     def get(self, request):
         """Obtener materiales devueltos al sector"""
@@ -119,4 +128,4 @@ class ReingresoSectorView(APIView):
                 'message': f'{len(materiales)} nuevos materiales ingresados desde sector'
             })
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

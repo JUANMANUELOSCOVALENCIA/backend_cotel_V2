@@ -8,10 +8,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
 from django_filters.rest_framework import DjangoFilterBackend
 
 from contratos.models import TipoServicio
 from contratos.serializers import TipoServicioSerializer
+from ..optimizaciones import (
+    optimizar_almacenes, optimizar_proveedores, optimizar_marcas, optimizar_modelos, optimizar_sectores
+)
 from ..models import (
     TipoIngreso, EstadoLote, EstadoTraspaso, TipoMaterial, UnidadMedida,
     EstadoMaterialONU, EstadoMaterialGeneral, TipoAlmacen,Almacen, Proveedor, Marca, Modelo, Lote, Componente,SectorSolicitante
@@ -30,7 +34,8 @@ class TipoIngresoViewSet(viewsets.ModelViewSet):
     """ViewSet para tipos de ingreso"""
     queryset = TipoIngreso.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoIngresoSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'descripcion']
@@ -62,7 +67,8 @@ class EstadoLoteViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de lote"""
     queryset = EstadoLote.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoLoteSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['es_final', 'activo']
@@ -89,7 +95,8 @@ class EstadoTraspasoViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de traspaso"""
     queryset = EstadoTraspaso.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoTraspasoSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['es_final', 'activo']
@@ -110,7 +117,8 @@ class TipoMaterialViewSet(viewsets.ModelViewSet):
     queryset = TipoMaterial.objects.all().select_related('unidad_medida_default', 'created_by').order_by('orden',
                                                                                                          'nombre')
     serializer_class = TipoMaterialSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['es_unico', 'requiere_inspeccion_inicial', 'activo', 'unidad_medida_default']
@@ -188,7 +196,8 @@ class UnidadMedidaViewSet(viewsets.ModelViewSet):
     """ViewSet para unidades de medida"""
     queryset = UnidadMedida.objects.all().order_by('orden', 'nombre')
     serializer_class = UnidadMedidaSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'simbolo', 'descripcion']
@@ -220,7 +229,8 @@ class EstadoMaterialONUViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de material ONU"""
     queryset = EstadoMaterialONU.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialONUSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['permite_asignacion', 'permite_traspaso', 'activo']
@@ -267,7 +277,8 @@ class EstadoMaterialGeneralViewSet(viewsets.ModelViewSet):
     """ViewSet para estados de material general"""
     queryset = EstadoMaterialGeneral.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialGeneralSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['permite_consumo', 'permite_traspaso', 'activo']
@@ -301,7 +312,8 @@ class TipoAlmacenViewSet(viewsets.ModelViewSet):
     """ViewSet para tipos de almacén"""
     queryset = TipoAlmacen.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoAlmacenSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['codigo', 'nombre', 'descripcion']
@@ -336,7 +348,10 @@ class OpcionesCompletasView(APIView):
     View especial que devuelve TODAS las opciones necesarias para el frontend React.
     Esto evita múltiples llamadas HTTP y proporciona todos los datos para comboboxes.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'almacenes'
+    accion_permiso = 'leer'
+    lectura_alternativa = LECTURA_ALMACENES  # datos de los formularios
 
     # En choices_views.py, agregar a OpcionesCompletasView
 
@@ -384,25 +399,24 @@ class OpcionesCompletasView(APIView):
 
         # Entidades principales (con información completa)
         cache_data['almacenes'] = AlmacenSerializer(
-            Almacen.objects.filter(activo=True).select_related('tipo', 'encargado').order_by('codigo'), many=True
+            optimizar_almacenes(Almacen.objects.filter(activo=True)).order_by('codigo'), many=True
         ).data
 
         cache_data['proveedores'] = ProveedorSerializer(
-            Proveedor.objects.filter(activo=True).order_by('nombre_comercial'), many=True
+            optimizar_proveedores(Proveedor.objects.filter(activo=True)).order_by('nombre_comercial'), many=True
         ).data
 
         cache_data['marcas'] = MarcaSerializer(
-            Marca.objects.filter(activo=True).order_by('nombre'), many=True
+            optimizar_marcas(Marca.objects.filter(activo=True)).order_by('nombre'), many=True
         ).data
 
         cache_data['sectores_solicitantes'] = SectorSolicitanteSerializer(
-            SectorSolicitante.objects.filter(activo=True).order_by('orden'), many=True
+            optimizar_sectores(SectorSolicitante.objects.filter(activo=True)).order_by('orden'), many=True
         ).data
 
         # AGREGADO: Modelos con todas las relaciones
         cache_data['modelos'] = ModeloSerializer(
-            Modelo.objects.filter(activo=True).select_related('marca', 'tipo_material', 'unidad_medida').order_by(
-                'nombre'),
+            optimizar_modelos(Modelo.objects.filter(activo=True)).order_by('nombre'),
             many=True
         ).data
 
@@ -457,7 +471,8 @@ class InicializarDatosView(APIView):
     View para inicializar todos los datos base del sistema.
     Solo para administradores en primera instalación.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    solo_superusuario = True
 
     def post(self, request):
         """Crear todos los datos iniciales del sistema"""
@@ -501,4 +516,4 @@ class InicializarDatosView(APIView):
                     'error': f'Error al crear datos iniciales: {str(e)}'
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            )

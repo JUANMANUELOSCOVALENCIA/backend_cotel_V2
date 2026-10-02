@@ -7,6 +7,7 @@ from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import rest_framework as django_filters
 from rest_framework.views import APIView
@@ -81,6 +82,7 @@ class MaterialFilter(django_filters.FilterSet):
             'almacen_actual': ['exact'],
             'modelo': ['exact'],
             'estado_onu': ['exact'],
+            'estado_general': ['exact'],
             'tipo_origen': ['exact'],
             # ✅ AGREGAR: Filtro directo por es_unico
             'tipo_material__es_unico': ['exact'],
@@ -90,12 +92,14 @@ class MaterialFilter(django_filters.FilterSet):
 class MaterialViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de materiales (ONUs y otros)"""
     queryset = Material.objects.select_related(
-        'modelo__marca', 'modelo__tipo_material', 'modelo__unidad_medida', 'lote', 'almacen_actual',
+        'modelo__marca', 'modelo__tipo_material', 'modelo__unidad_medida', 'almacen_actual',
+        'lote__proveedor', 'lote__almacen_destino',  # antes: 2 consultas extra por fila
         'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen'
     ).order_by('-created_at')
 
     pagination_class = CustomPageNumberPagination
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    acciones_permiso = {'busqueda_avanzada': 'leer', 'devolver_a_sector': 'actualizar'}
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = MaterialFilter
@@ -118,8 +122,11 @@ class MaterialViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
 
-        # Filtro por tipo de material (solo ONUs por defecto)
-        tipo_material = self.request.query_params.get('tipo_material', 'ONU')
+        # Filtro por tipo de material (solo ONUs por defecto, salvo que se pida
+        # explícitamente por único/no único, p. ej. la pantalla de materiales no únicos)
+        params = self.request.query_params
+        por_defecto = None if 'tipo_material__es_unico' in params else 'ONU'
+        tipo_material = params.get('tipo_material', por_defecto)
         if tipo_material:
             try:
                 tipo = TipoMaterial.objects.get(codigo=tipo_material, activo=True)
@@ -134,24 +141,28 @@ class MaterialViewSet(viewsets.ModelViewSet):
         """Estadísticas de materiales"""
         queryset = self.filter_queryset(self.get_queryset())
 
-        # Estadísticas por estado
-        estados_stats = {}
-        for estado in EstadoMaterialONU.objects.filter(activo=True):
-            count = queryset.filter(estado_onu=estado).count()
-            estados_stats[estado.nombre] = count
+        # Estadísticas por estado (ONU + estados generales), en 2 consultas agrupadas
+        from django.db.models import Count
+        estados_stats = {e.nombre: 0 for e in EstadoMaterialONU.objects.filter(activo=True)}
+        for nombre, n in queryset.filter(estado_onu__activo=True).order_by().values_list('estado_onu__nombre').annotate(n=Count('id')):
+            estados_stats[nombre] = estados_stats.get(nombre, 0) + n
+        for nombre, n in queryset.filter(estado_general__activo=True).order_by().values_list('estado_general__nombre').annotate(n=Count('id')):
+            estados_stats[nombre] = estados_stats.get(nombre, 0) + n
 
-        # Estadísticas por almacén
-        almacenes_stats = {}
-        for almacen in Almacen.objects.filter(activo=True):
-            count = queryset.filter(almacen_actual=almacen).count()
-            if count > 0:
-                almacenes_stats[almacen.nombre] = count
+        # Estadísticas por almacén (solo los que tienen materiales)
+        por_almacen = dict(
+            queryset.filter(almacen_actual__activo=True).order_by().values_list('almacen_actual_id').annotate(n=Count('id'))
+        )
+        almacenes_stats = {
+            a.nombre: por_almacen[a.id]
+            for a in Almacen.objects.filter(activo=True, id__in=por_almacen.keys())
+        }
 
         # Estadísticas por lote
         lotes_stats = queryset.values(
             'lote__numero_lote'
         ).annotate(
-            count=models.Count('id')
+            count=Count('id')
         ).order_by('-count')[:10]
 
         return Response({
@@ -162,6 +173,47 @@ class MaterialViewSet(viewsets.ModelViewSet):
             'nuevos': queryset.filter(es_nuevo=True).count(),
             'reingresados': queryset.filter(es_nuevo=False).count(),
         })
+
+    @action(detail=False, methods=['get'])
+    def stock_granel(self, request):
+        """
+        Stock de materiales a granel (cable, conectores…) agrupado por modelo y almacén.
+        Filtros: almacen, modelo, search (nombre del modelo o marca).
+        """
+        from django.db.models import Count, Sum
+        qs = Material.objects.filter(tipo_material__es_unico=False)
+        p = request.query_params
+        if p.get('almacen'):
+            qs = qs.filter(almacen_actual_id=p['almacen'])
+        if p.get('modelo'):
+            qs = qs.filter(modelo_id=p['modelo'])
+        if p.get('search'):
+            qs = qs.filter(Q(modelo__nombre__icontains=p['search']) | Q(modelo__marca__nombre__icontains=p['search']))
+
+        filas = {}
+        datos = qs.values(
+            'modelo_id', 'modelo__nombre', 'modelo__marca__nombre', 'modelo__codigo_modelo',
+            'modelo__unidad_medida__simbolo', 'tipo_material__nombre',
+            'almacen_actual_id', 'almacen_actual__codigo', 'almacen_actual__nombre',
+            'estado_general__codigo', 'estado_general__nombre', 'estado_general__permite_consumo',
+        ).annotate(total=Sum('cantidad'), registros=Count('id')).order_by('modelo__nombre', 'almacen_actual__codigo')
+        for d in datos:
+            clave = (d['modelo_id'], d['almacen_actual_id'])
+            fila = filas.setdefault(clave, {
+                'modelo': {'id': d['modelo_id'], 'nombre': d['modelo__nombre'], 'marca': d['modelo__marca__nombre'],
+                           'codigo_modelo': d['modelo__codigo_modelo'], 'tipo': d['tipo_material__nombre']},
+                'unidad': d['modelo__unidad_medida__simbolo'],
+                'almacen': {'id': d['almacen_actual_id'], 'codigo': d['almacen_actual__codigo'], 'nombre': d['almacen_actual__nombre']},
+                'disponible': 0, 'total': 0, 'registros': 0, 'por_estado': {},
+            })
+            cant = float(d['total'] or 0)
+            fila['total'] += cant
+            fila['registros'] += d['registros']
+            nombre = d['estado_general__nombre'] or 'Sin estado'
+            fila['por_estado'][nombre] = fila['por_estado'].get(nombre, 0) + cant
+            if d['estado_general__permite_consumo']:
+                fila['disponible'] += cant
+        return Response({'results': list(filas.values())})
 
     @action(detail=False, methods=['get'])
     def solo_onus(self, request):
@@ -183,25 +235,47 @@ class MaterialViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def cambiar_estado(self, request, pk=None):
         """Cambiar estado de un material"""
+        # Corrección manual de estado: exige motivo y queda en el historial.
+        # Los pasos normales (laboratorio, traspasos, devoluciones) tienen su propio flujo.
         material = self.get_object()
         nuevo_estado_id = request.data.get('estado_id')
+        motivo = (request.data.get('motivo') or '').strip()
 
         if not nuevo_estado_id:
-            return Response(
-                {'error': 'estado_id es requerido'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Elige el nuevo estado'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(motivo) < 5:
+            return Response({'error': 'Indica el motivo del cambio (mínimo 5 caracteres)'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            from ..models import EstadoMaterialGeneral, HistorialMaterial
             if material.tipo_material.es_unico:
+                anterior = material.estado_onu
+                if anterior and anterior.codigo == 'EN_LABORATORIO':
+                    return Response({'error': 'El equipo está en laboratorio: registra el resultado desde Laboratorio.'}, status=status.HTTP_400_BAD_REQUEST)
                 nuevo_estado = EstadoMaterialONU.objects.get(id=nuevo_estado_id, activo=True)
+                if nuevo_estado.codigo == 'EN_LABORATORIO':
+                    return Response({'error': 'Para enviar a laboratorio usa el envío desde el lote o el laboratorio.'}, status=status.HTTP_400_BAD_REQUEST)
                 material.estado_onu = nuevo_estado
             else:
-                from ..models import EstadoMaterialGeneral
+                anterior = material.estado_general
                 nuevo_estado = EstadoMaterialGeneral.objects.get(id=nuevo_estado_id, activo=True)
                 material.estado_general = nuevo_estado
 
-            material.save()
+            if anterior and anterior.id == nuevo_estado.id:
+                return Response({'error': f'El material ya está en estado {nuevo_estado.nombre}'}, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                material.save()
+                HistorialMaterial.objects.create(
+                    material=material,
+                    estado_anterior=(anterior.codigo if anterior else '')[:25],
+                    estado_nuevo=nuevo_estado.codigo[:25],
+                    almacen_anterior=material.almacen_actual,
+                    almacen_nuevo=material.almacen_actual,
+                    motivo='Corrección manual de estado',
+                    observaciones=motivo,
+                    usuario_responsable=request.user,
+                )
 
             return Response({
                 'message': f'Estado cambiado a {nuevo_estado.nombre}',
@@ -312,7 +386,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 for material in materiales:
                     # Cambiar estado
                     material.estado_onu = estado_devuelto
-                    material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.now().date()} - {motivo}"
+                    material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.localdate()} - {motivo}"
                     material.save()
 
                     # Registrar sector afectado
@@ -323,7 +397,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
                     HistorialMaterial.objects.create(
                         material=material,
                         estado_anterior='DEFECTUOSO',
-                        estado_nuevo='DEVUELTO_SECTOR_SOLICITANTE',
+                        estado_nuevo='DEVUELTO_SECTOR',
                         almacen_anterior=material.almacen_actual,
                         almacen_nuevo=material.almacen_actual,
                         motivo=f'Devuelto a sector: {material.lote.sector_solicitante.nombre if material.lote.sector_solicitante else "Sin sector"}',
@@ -337,7 +411,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 'message': f'{count} equipos devueltos al sector para gestión de reposición',
                 'count': count,
                 'sectores_afectados': list(sectores_afectados),
-                'fecha_devolucion': timezone.now().date()
+                'fecha_devolucion': timezone.localdate()
             })
 
         except (EstadoMaterialONU.DoesNotExist) as e:
@@ -379,7 +453,9 @@ class MaterialViewSet(viewsets.ModelViewSet):
 
 class ReingresoMaterialView(APIView):
     """View para manejar reingresos de materiales de reposición"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'materiales'
+    accion_permiso = 'actualizar'
 
     def post(self, request):
         """Registrar reingreso de material de reposición (desde devolución)"""
@@ -525,4 +601,4 @@ class ReingresoMaterialView(APIView):
             return Response({
                 'success': False,
                 'error': f'Error interno: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

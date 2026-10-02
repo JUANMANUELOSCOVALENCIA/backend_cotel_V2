@@ -11,6 +11,7 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
 from django_filters.rest_framework import DjangoFilterBackend
 
 from ..models import (
@@ -30,7 +31,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
     queryset = TraspasoAlmacen.objects.all().select_related(
         'almacen_origen', 'almacen_destino', 'usuario_envio', 'usuario_recepcion', 'estado'
     ).prefetch_related('materiales__material')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
@@ -406,7 +407,7 @@ class TraspasoAlmacenViewSet(viewsets.ModelViewSet):
             en_transito = 0
 
         # Estadísticas por período
-        hoy = timezone.now().date()
+        hoy = timezone.localdate()
         hace_30_dias = hoy - timedelta(days=30)
         hace_7_dias = hoy - timedelta(days=7)
 

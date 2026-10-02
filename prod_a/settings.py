@@ -96,6 +96,10 @@ DATABASES = {
         'PASSWORD': 'Lavaca356',
         'HOST': '100.117.101.43',  # O la dirección de tu servidor PostgreSQL
         'PORT': '5432',  # Puerto por defecto de PostgreSQL
+        # Reutilizar la conexión 60 s en vez de abrir una nueva por cada petición
+        # (cada conexión nueva por Tailscale cuesta varios viajes de red)
+        'CONN_MAX_AGE': 60,
+        'CONN_HEALTH_CHECKS': True,
     }
 }
 
@@ -121,9 +125,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.1/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'es'  # mensajes de Django/DRF en español
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/La_Paz'  # fechas del sistema en hora de Bolivia
 
 USE_I18N = True
 

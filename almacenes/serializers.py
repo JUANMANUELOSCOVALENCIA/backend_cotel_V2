@@ -37,6 +37,11 @@ from .models import (
 
 # ========== SERIALIZERS PARA MODELOS DE CHOICES ==========
 
+
+def nombre_sector(lote):
+    """Nombre del sector solicitante del lote (ahora es opcional)."""
+    return lote.sector_solicitante.nombre if lote and lote.sector_solicitante_id else 'sin sector'
+
 class TipoIngresoSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoIngreso
@@ -118,9 +123,9 @@ class AlmacenSerializer(serializers.ModelSerializer):
     tipo_info = serializers.SerializerMethodField()
     encargado_info = serializers.ReadOnlyField()
 
-    # Propiedades calculadas
-    total_materiales = serializers.ReadOnlyField()
-    materiales_disponibles = serializers.ReadOnlyField()
+    # Propiedades calculadas (precalculadas por optimizar_almacenes() cuando es posible)
+    total_materiales = serializers.SerializerMethodField()
+    materiales_disponibles = serializers.SerializerMethodField()
 
     # Información de auditoría
     created_by_nombre = serializers.CharField(source='created_by.nombre_completo', read_only=True)
@@ -144,6 +149,14 @@ class AlmacenSerializer(serializers.ModelSerializer):
                 'nombre': obj.tipo.nombre
             }
         return None
+
+    def get_total_materiales(self, obj):
+        v = getattr(obj, '_total_materiales', None)
+        return obj.total_materiales if v is None else v
+
+    def get_materiales_disponibles(self, obj):
+        v = getattr(obj, '_materiales_disponibles', None)
+        return obj.materiales_disponibles if v is None else v
 
     def validate_codigo(self, value):
         if not value or len(value.strip()) < 2:
@@ -187,7 +200,8 @@ class ProveedorSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
     def get_lotes_count(self, obj):
-        return obj.lote_set.count()
+        v = getattr(obj, '_lotes_count', None)
+        return obj.lote_set.count() if v is None else v
 
 
 # ========== SERIALIZERS DE MODELOS EXISTENTES ACTUALIZADOS ==========
@@ -203,9 +217,13 @@ class MarcaSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
     def get_modelos_count(self, obj):
-        return obj.modelo_set.filter(activo=True).count()
+        v = getattr(obj, '_modelos_count', None)
+        return obj.modelo_set.filter(activo=True).count() if v is None else v
 
     def get_materiales_count(self, obj):
+        v = getattr(obj, '_materiales_count', None)
+        if v is not None:
+            return v
         return sum(modelo.material_set.count() for modelo in obj.modelo_set.filter(activo=True))
 
 class ComponenteSerializer(serializers.ModelSerializer):
@@ -258,7 +276,7 @@ class ModeloSerializer(serializers.ModelSerializer):
             'id', 'marca', 'marca_info',
             'nombre', 'codigo_modelo', 'descripcion', 'activo',
             'tipo_material', 'tipo_material_info', 'unidad_medida', 'unidad_medida_info',
-            'cantidad_por_unidad', 'requiere_inspeccion_inicial',
+            'cantidad_por_unidad', 'requiere_inspeccion_inicial', 'pruebas_laboratorio',
             'componentes', 'materiales_count', 'materiales_disponibles',
             'created_at', 'updated_at', 'componentes_data'
         ]
@@ -288,9 +306,13 @@ class ModeloSerializer(serializers.ModelSerializer):
         }
 
     def get_materiales_count(self, obj):
-        return obj.material_set.count()
+        v = getattr(obj, '_materiales_count', None)
+        return obj.material_set.count() if v is None else v
 
     def get_materiales_disponibles(self, obj):
+        # Precalculado por optimizar_modelos()
+        if hasattr(obj, '_disp_onu'):
+            return obj._disp_onu if obj.tipo_material.es_unico else obj._disp_general
         if obj.tipo_material.es_unico:
             return obj.material_set.filter(
                 estado_onu__permite_asignacion=True
@@ -443,6 +465,8 @@ class LoteSerializer(serializers.ModelSerializer):
         }
 
     def get_tipo_servicio_info(self, obj):
+        if not obj.tipo_servicio_id:
+            return None
         return {
             'id': obj.tipo_servicio.id,
             'nombre': obj.tipo_servicio.nombre
@@ -511,17 +535,34 @@ class LoteCreateSerializer(serializers.ModelSerializer):
             except Almacen.DoesNotExist:
                 raise serializers.ValidationError("Almacén principal (ID=1) no encontrado")
 
+        # Códigos SPRINT: solo números, de 6 a 10 dígitos
+        for campo, nombre in (('codigo_requerimiento_compra', 'requerimiento de compra'), ('codigo_nota_ingreso', 'nota de ingreso')):
+            valor = (data.get(campo) or '').strip()
+            if campo in data:
+                if not re.fullmatch(r'\d{6,10}', valor):
+                    raise serializers.ValidationError({campo: f'El código de {nombre} debe tener de 6 a 10 dígitos.'})
+                data[campo] = valor
+
+        # Cada modelo una sola vez y con cantidad positiva
+        vistos = set()
+        for d in data.get('detalles') or []:
+            if d.get('cantidad') is None or d['cantidad'] < 1:
+                raise serializers.ValidationError({'detalles': f'La cantidad de {d["modelo"].nombre} debe ser mayor a 0.'})
+            if d['modelo'].id in vistos:
+                raise serializers.ValidationError({'detalles': f'El modelo {d["modelo"].nombre} está repetido.'})
+            vistos.add(d['modelo'].id)
+
         # Validar fechas de garantía
         if data.get('fecha_fin_garantia') and data.get('fecha_inicio_garantia'):
             if data['fecha_fin_garantia'] <= data['fecha_inicio_garantia']:
                 raise serializers.ValidationError("La fecha de fin de garantía debe ser posterior al inicio")
 
-        # Validar almacén destino para lotes nuevos
+        # Un lote es lo que entrega un proveedor: compra o reposición por garantía.
+        # (Los equipos que vuelven de clientes no se registran como lote.)
+        # El almacén destino es libre (por defecto el principal en el formulario).
         tipo_ingreso = data.get('tipo_ingreso')
-        if tipo_ingreso and tipo_ingreso.codigo == 'NUEVO':
-            almacen = data.get('almacen_destino')
-            if almacen and not almacen.es_principal:
-                raise serializers.ValidationError("Los lotes nuevos solo pueden ir al almacén principal")
+        if tipo_ingreso and tipo_ingreso.codigo not in Lote.TIPOS_INGRESO_LOTE:
+            raise serializers.ValidationError({'tipo_ingreso': 'Un lote solo puede ser de compra o de reposición por garantía.'})
 
         return data
 
@@ -547,16 +588,49 @@ class LoteCreateSerializer(serializers.ModelSerializer):
         return lote
 
     def update(self, instance, validated_data):
-        # Remover detalles de validated_data si existe
         detalles_data = validated_data.pop('detalles', None)
+        validated_data.pop('numero_lote', None)  # el número no se cambia
 
-        # ✅ IMPORTANTE: No actualizar numero_lote en updates
-        validated_data.pop('numero_lote', None)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
 
-        # Actualizar campos del lote
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
+            # Modelos y cantidades: se pueden agregar modelos y cambiar cantidades,
+            # pero nunca por debajo de lo ya recibido; un modelo con material recibido no se quita.
+            if detalles_data is not None:
+                if instance.estado and instance.estado.codigo == 'CERRADO':
+                    raise serializers.ValidationError({'detalles': 'El lote está cerrado: no se pueden cambiar sus modelos o cantidades.'})
+                if not detalles_data:
+                    raise serializers.ValidationError({'detalles': 'El lote debe tener al menos un modelo.'})
+                actuales = {d.modelo_id: d for d in instance.detalles.select_related('modelo__tipo_material', 'modelo__marca')}
+                pedidos = {}
+                for d in detalles_data:
+                    modelo = d['modelo']
+                    if modelo.id in pedidos:
+                        raise serializers.ValidationError({'detalles': f'El modelo {modelo.nombre} está repetido.'})
+                    pedidos[modelo.id] = d
+                errores = []
+                for modelo_id, detalle in actuales.items():
+                    recibido = detalle.cantidad_recibida
+                    nombre = f'{detalle.modelo.marca.nombre} {detalle.modelo.nombre}'
+                    if modelo_id not in pedidos:
+                        if recibido > 0:
+                            errores.append(f'No se puede quitar {nombre}: ya se recibieron {recibido}.')
+                    elif pedidos[modelo_id]['cantidad'] < recibido:
+                        errores.append(f'{nombre}: la cantidad no puede ser menor a lo ya recibido ({recibido}).')
+                if errores:
+                    raise serializers.ValidationError({'detalles': ' '.join(errores)})
+                for modelo_id, detalle in actuales.items():
+                    if modelo_id not in pedidos:
+                        detalle.delete()
+                    elif detalle.cantidad != pedidos[modelo_id]['cantidad']:
+                        detalle.cantidad = pedidos[modelo_id]['cantidad']
+                        detalle.save(update_fields=['cantidad'])
+                for modelo_id, d in pedidos.items():
+                    if modelo_id not in actuales:
+                        LoteDetalle.objects.create(lote=instance, modelo=d['modelo'], cantidad=d['cantidad'])
+                instance.actualizar_estado_recepcion()
 
         return instance
 
@@ -731,7 +805,8 @@ class MaterialListSerializer(serializers.ModelSerializer):
             'nombre': obj.modelo.nombre,
             'codigo_modelo': obj.modelo.codigo_modelo,
             'marca': obj.modelo.marca.nombre if obj.modelo.marca else 'Sin Marca',
-            'tipo_material': obj.modelo.tipo_material.nombre if obj.modelo.tipo_material else 'Sin Tipo'
+            'tipo_material': obj.modelo.tipo_material.nombre if obj.modelo.tipo_material else 'Sin Tipo',
+            'unidad_medida': obj.modelo.unidad_medida.simbolo if obj.modelo.unidad_medida_id else ''
         }
 
     def get_lote_info(self, obj):
@@ -1447,22 +1522,36 @@ class ListaOpcionesSerializer(serializers.Serializer):
 class MaterialDetailSerializer(MaterialListSerializer):
     """Serializer detallado para un material específico"""
     historial = serializers.SerializerMethodField()
+    inspecciones = serializers.SerializerMethodField()
     especificaciones_tecnicas = serializers.JSONField(read_only=True)
 
     class Meta(MaterialListSerializer.Meta):
         fields = MaterialListSerializer.Meta.fields + [
-            'historial', 'especificaciones_tecnicas', 'observaciones',
+            'historial', 'inspecciones', 'especificaciones_tecnicas', 'observaciones',
             'fecha_envio_laboratorio', 'fecha_retorno_laboratorio',
             'traspaso_actual', 'orden_trabajo'
         ]
 
+    def get_inspecciones(self, obj):
+        return [{
+            'id': i.id,
+            'numero_informe': i.numero_informe,
+            'fecha': i.fecha_inspeccion,
+            'aprobado': i.aprobado,
+            'pruebas': dict(i.resultados_pruebas),
+            'fallas': i.fallas_detectadas or [],
+            'observaciones': i.observaciones_tecnico or i.comentarios_adicionales,
+            'tecnico': (i.usuario_responsable.nombre_completo if i.usuario_responsable_id else '') or i.tecnico_revisor,
+        } for i in obj.inspecciones_laboratorio.select_related('usuario_responsable').all()[:20]] if hasattr(obj, 'inspecciones_laboratorio') else []
+
     def get_historial(self, obj):
-        # Obtener historial reciente
-        historial = obj.historial.all()[:10]
+        # Historial completo (más reciente primero)
+        historial = obj.historial.select_related('almacen_anterior', 'almacen_nuevo', 'usuario_responsable').all()[:50]
         return [{
             'id': h.id,
             'fecha_cambio': h.fecha_cambio,
             'motivo': h.motivo,
+            'observaciones': h.observaciones,
             'estado_anterior': h.estado_anterior,
             'estado_nuevo': h.estado_nuevo,
             'almacen_anterior': h.almacen_anterior.nombre if h.almacen_anterior else None,
@@ -1491,12 +1580,18 @@ class ComponenteCreateUpdateSerializer(serializers.ModelSerializer):
         return value
 
 class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
-    """Serializer para crear/actualizar modelos"""
+    """Serializer para crear/actualizar modelos (incluye contenido de la caja)"""
     componentes_ids = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
         write_only=True,
-        help_text="Lista de IDs de componentes"
+        help_text="(Compatibilidad) Lista de IDs de componentes, cantidad 1"
+    )
+    componentes = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        write_only=True,
+        help_text="Contenido de la caja: [{'componente_id': 1, 'cantidad': 2}]"
     )
 
     class Meta:
@@ -1504,8 +1599,21 @@ class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
         fields = [
             'marca', 'tipo_material', 'unidad_medida',
             'nombre', 'codigo_modelo', 'descripcion', 'cantidad_por_unidad',
-            'requiere_inspeccion_inicial', 'activo', 'componentes_ids'
+            'requiere_inspeccion_inicial', 'pruebas_laboratorio', 'activo', 'componentes_ids', 'componentes'
         ]
+
+    def validate_pruebas_laboratorio(self, value):
+        """Lista de pruebas del laboratorio que aplican al modelo (vacía = todas)."""
+        from .models import CAMPOS_PRUEBA
+        if value in (None, ''):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Debe ser una lista de pruebas.')
+        desconocidas = [v for v in value if v not in CAMPOS_PRUEBA]
+        if desconocidas:
+            raise serializers.ValidationError(f'Pruebas no válidas: {", ".join(map(str, desconocidas))}')
+        # se guardan en el orden oficial y sin repetir
+        return [c for c in CAMPOS_PRUEBA if c in value]
 
     def validate_codigo_modelo(self, value):
         """Validar que el código de modelo sea único"""
@@ -1518,43 +1626,78 @@ class ModeloCreateUpdateSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate_componentes(self, value):
+        """Valida la lista [{componente_id, cantidad}]"""
+        limpios = []
+        vistos = set()
+        for item in value:
+            try:
+                componente_id = int(item.get('componente_id'))
+                cantidad = int(item.get('cantidad', 1))
+            except (TypeError, ValueError):
+                raise serializers.ValidationError('Cada componente necesita componente_id y cantidad numéricos')
+
+            if cantidad < 1 or cantidad > 999:
+                raise serializers.ValidationError('La cantidad debe estar entre 1 y 999')
+            if componente_id in vistos:
+                raise serializers.ValidationError('Un componente no puede repetirse en el mismo modelo')
+            vistos.add(componente_id)
+            limpios.append({'componente_id': componente_id, 'cantidad': cantidad})
+
+        existentes = set(Componente.objects.filter(id__in=vistos).values_list('id', flat=True))
+        faltantes = vistos - existentes
+        if faltantes:
+            raise serializers.ValidationError(f'Componentes inexistentes: {sorted(faltantes)}')
+        return limpios
+
+    def _extraer_componentes(self, validated_data):
+        """Devuelve la lista final de componentes, o None si no se enviaron"""
+        componentes = validated_data.pop('componentes', None)
+        componentes_ids = validated_data.pop('componentes_ids', None)
+        if componentes is not None:
+            return componentes
+        if componentes_ids is not None:
+            return [{'componente_id': cid, 'cantidad': 1} for cid in dict.fromkeys(componentes_ids)]
+        return None
+
+    def _guardar_componentes(self, modelo, componentes):
+        modelo.modelocomponente_set.all().delete()
+        ModeloComponente.objects.bulk_create([
+            ModeloComponente(modelo=modelo, componente_id=c['componente_id'], cantidad=c['cantidad'])
+            for c in componentes
+        ])
+
     def create(self, validated_data):
-        componentes_ids = validated_data.pop('componentes_ids', [])
+        componentes = self._extraer_componentes(validated_data)
+
+        # Si no se indicó, la inspección inicial se hereda del tipo de material
+        if 'requiere_inspeccion_inicial' not in self.initial_data and validated_data.get('tipo_material'):
+            validated_data['requiere_inspeccion_inicial'] = validated_data['tipo_material'].requiere_inspeccion_inicial
 
         with transaction.atomic():
             modelo = Modelo.objects.create(**validated_data)
-
-            if componentes_ids:
-                for componente_id in componentes_ids:
-                    ModeloComponente.objects.create(
-                        modelo=modelo,
-                        componente_id=componente_id,
-                        cantidad=1  # Valor por defecto
-                    )
+            if componentes:
+                self._guardar_componentes(modelo, componentes)
 
         return modelo
 
     def update(self, instance, validated_data):
-        componentes_ids = validated_data.pop('componentes_ids', None)
+        componentes = self._extraer_componentes(validated_data)
 
         with transaction.atomic():
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()
 
-            if componentes_ids is not None:
-                # Eliminar relaciones existentes
-                instance.modelocomponente_set.all().delete()
-
-                # Crear nuevas relaciones
-                for componente_id in componentes_ids:
-                    ModeloComponente.objects.create(
-                        modelo=instance,
-                        componente_id=componente_id,
-                        cantidad=1
-                    )
+            # Solo se reemplazan si se enviaron (None = no tocar)
+            if componentes is not None:
+                self._guardar_componentes(instance, componentes)
 
         return instance
+
+    def to_representation(self, instance):
+        # Responder con el detalle completo (incluye componentes con nombre y cantidad)
+        return ModeloSerializer(instance, context=self.context).data
 
 class InspeccionLaboratorioSerializer(serializers.ModelSerializer):
     material_info = serializers.SerializerMethodField()
@@ -1629,10 +1772,12 @@ class SectorSolicitanteSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
     def get_materiales_count(self, obj):
-        return Material.objects.filter(lote__sector_solicitante=obj).count()
+        v = getattr(obj, '_materiales_count', None)
+        return Material.objects.filter(lote__sector_solicitante=obj).count() if v is None else v
 
     def get_lotes_count(self, obj):
-        return obj.lote_set.count()
+        v = getattr(obj, '_lotes_count', None)
+        return obj.lote_set.count() if v is None else v
 
     def validate_nombre(self, value):
         """Validar que el nombre sea único"""
@@ -1680,7 +1825,7 @@ class DevolucionSectorSerializer(serializers.Serializer):
         with transaction.atomic():
             for material in materiales:
                 material.estado_onu = estado_devuelto
-                material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.now().date()} - {motivo}"
+                material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.localdate()} - {motivo}"
                 material.save()
 
                 # Historial
@@ -1690,7 +1835,7 @@ class DevolucionSectorSerializer(serializers.Serializer):
                     estado_nuevo='DEVUELTO_SECTOR',
                     almacen_anterior=material.almacen_actual,
                     almacen_nuevo=material.almacen_actual,
-                    motivo=f'Devuelto a sector: {material.lote.sector_solicitante.nombre}',
+                    motivo=f'Devuelto a sector: {nombre_sector(material.lote)}',
                     observaciones=motivo,
                     usuario_responsable=user
                 )
@@ -1780,12 +1925,12 @@ class ReingresoSectorSerializer(serializers.Serializer):
                     cantidad=1.00,
                     equipo_original=material_original,
                     numero_entrega_parcial=material_original.numero_entrega_parcial,
-                    observaciones=f"Equipo de reposición desde {material_original.lote.sector_solicitante.nombre}"
+                    observaciones=f"Equipo de reposición desde {nombre_sector(material_original.lote)}"
                 )
 
                 # Marcar original como REEMPLAZADO
                 material_original.estado_onu = estado_reemplazado
-                material_original.observaciones += f"\n[REEMPLAZADO] {timezone.now().date()} - Sustituido por: {nuevo_material.codigo_interno}"
+                material_original.observaciones += f"\n[REEMPLAZADO] {timezone.localdate()} - Sustituido por: {nuevo_material.codigo_interno}"
                 material_original.save()
 
                 # Historial para el nuevo
@@ -1795,7 +1940,7 @@ class ReingresoSectorSerializer(serializers.Serializer):
                     estado_nuevo='NUEVO',
                     almacen_anterior=None,
                     almacen_nuevo=nuevo_material.almacen_actual,
-                    motivo=f'Reposición desde {material_original.lote.sector_solicitante.nombre}',
+                    motivo=f'Reposición desde {nombre_sector(material_original.lote)}',
                     observaciones=f'Reemplaza {material_original.codigo_interno}',
                     usuario_responsable=user
                 )

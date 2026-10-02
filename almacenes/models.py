@@ -291,19 +291,21 @@ class Almacen(models.Model):
         if self.codigo_cotel_encargado:
             try:
                 from usuarios.models import Usuario
-                encargado = Usuario.objects.get(codigo_cotel=self.codigo_cotel_encargado)
+                encargado = Usuario.objects.get(codigocotel=self.codigo_cotel_encargado)
                 self.encargado = encargado
             except Usuario.DoesNotExist:
                 raise ValidationError(f"No se encontró usuario con código COTEL: {self.codigo_cotel_encargado}")
 
     def save(self, *args, **kwargs):
-        # Auto-asignar encargado por código COTEL
-        if self.codigo_cotel_encargado and not self.encargado:
-            try:
-                from usuarios.models import Usuario
-                self.encargado = Usuario.objects.get(codigocotel=self.codigo_cotel_encargado)
-            except Usuario.DoesNotExist:
-                pass
+        # El encargado siempre sigue al código COTEL: si cambia el código cambia la persona,
+        # y si se borra el código el almacén queda sin encargado.
+        from usuarios.models import Usuario
+        codigo = (self.codigo_cotel_encargado or '').strip()
+        self.codigo_cotel_encargado = codigo or None
+        if not codigo:
+            self.encargado = None
+        elif not self.encargado or str(self.encargado.codigocotel) != codigo:
+            self.encargado = Usuario.objects.filter(codigocotel=codigo).first() if codigo.isdigit() else None
 
         super().save(*args, **kwargs)
 
@@ -313,11 +315,9 @@ class Almacen(models.Model):
         if self.encargado:
             return {
                 'id': self.encargado.id,
-                'codigo_cotel': self.encargado.codigo_cotel,
+                'codigo_cotel': self.encargado.codigocotel,
                 'nombre_completo': self.encargado.nombre_completo,
-                'email': self.encargado.email,
-                'telefono': getattr(self.encargado, 'telefono', ''),
-                'cargo': getattr(self.encargado, 'cargo', '')
+                'rol': self.encargado.rol.nombre if self.encargado.rol_id else None,
             }
         return None
 
@@ -399,6 +399,20 @@ class Componente(models.Model):
     class Meta:
         db_table = 'almacenes_componente'
 
+# Pruebas de laboratorio para equipos ONU: (campo en InspeccionLaboratorio, nombre visible, código de falla)
+PRUEBAS_LABORATORIO = [
+    ('serie_logica_ok', 'Serie lógica', 'SERIE_LOGICA_DEFECTUOSA'),
+    ('puerto_ethernet_ok', 'Puerto Ethernet', 'PUERTO_ETHERNET_DEFECTUOSO'),
+    ('puerto_lan_ok', 'Puertos LAN', 'PUERTO_LAN_DEFECTUOSO'),
+    ('wifi_24_ok', 'WiFi 2.4 GHz', 'WIFI_24_DEFECTUOSO'),
+    ('wifi_5_ok', 'WiFi 5 GHz', 'WIFI_5_DEFECTUOSO'),
+    ('puerto_catv_ok', 'Puerto CATV', 'PUERTO_CATV_DEFECTUOSO'),
+    ('puerto_telefonia_rf_ok', 'Telefonía (POTS)', 'PUERTO_TELEFONIA_RF_DEFECTUOSO'),
+    ('otros_ok', 'Otras pruebas', 'OTROS_DEFECTUOSOS'),
+]
+CAMPOS_PRUEBA = [c for c, _, _ in PRUEBAS_LABORATORIO]
+
+
 class Modelo(models.Model):
     marca = models.ForeignKey(Marca, on_delete=models.CASCADE)
     nombre = models.CharField(max_length=100)
@@ -430,6 +444,10 @@ class Modelo(models.Model):
         default=True,
         help_text="Indica si requiere inspección en laboratorio al ingresar como NUEVO"
     )
+    pruebas_laboratorio = models.JSONField(
+        default=list, blank=True,
+        help_text="Pruebas que aplican a este modelo (campos de PRUEBAS_LABORATORIO). Vacío = todas."
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -437,18 +455,22 @@ class Modelo(models.Model):
     def __str__(self):
         return f"{self.marca.nombre} {self.nombre} ({self.codigo_modelo})"
 
+    @property
+    def pruebas_aplicables(self):
+        """Campos de prueba de laboratorio de este modelo (todas si no se configuró)."""
+        elegidas = [c for c in CAMPOS_PRUEBA if c in (self.pruebas_laboratorio or [])]
+        return elegidas or list(CAMPOS_PRUEBA)
+
     class Meta:
         unique_together = ['marca', 'nombre']
         db_table = 'almacenes_modelo'
 
     def save(self, *args, **kwargs):
-        # Heredar configuraciones del tipo de material si no están establecidas
-        if self.tipo_material:
-            if not self.unidad_medida_id:
-                self.unidad_medida = self.tipo_material.unidad_medida_default
-
-            if not hasattr(self, '_inspeccion_set'):
-                self.requiere_inspeccion_inicial = self.tipo_material.requiere_inspeccion_inicial
+        # Heredar la unidad de medida del tipo de material si no se indicó.
+        # NOTA: requiere_inspeccion_inicial ya NO se pisa aquí; se respeta lo que
+        # el usuario elige. El valor por defecto (según el tipo) lo pone el serializer.
+        if self.tipo_material and not self.unidad_medida_id:
+            self.unidad_medida = self.tipo_material.unidad_medida_default
 
         super().save(*args, **kwargs)
 
@@ -510,12 +532,14 @@ class Lote(models.Model):
         on_delete=models.CASCADE,
         help_text="Almacén donde se reciben los materiales"
     )
-    tipo_servicio = models.ForeignKey('contratos.TipoServicio', on_delete=models.CASCADE)
-    # Sector solicitante
+    # Opcionales: el servicio se define al instalar (contrato), no al comprar
+    tipo_servicio = models.ForeignKey('contratos.TipoServicio', on_delete=models.CASCADE, null=True, blank=True)
     sector_solicitante = models.ForeignKey(
         SectorSolicitante,
         on_delete=models.CASCADE,
-        help_text="Sector que solicita los materiales"
+        null=True,
+        blank=True,
+        help_text="Sector que solicitó la compra (opcional)"
     )
 
     # Códigos SPRINT
@@ -581,7 +605,8 @@ class Lote(models.Model):
 
     @property
     def cantidad_recibida(self):
-        return self.material_set.count()
+        # Suma por detalle: equipos únicos cuentan filas, materiales a granel suman cantidades
+        return sum(detalle.cantidad_recibida for detalle in self.detalles.all())
 
     @property
     def cantidad_pendiente(self):
@@ -593,6 +618,41 @@ class Lote(models.Model):
         if total == 0:
             return 0
         return round((self.cantidad_recibida / total) * 100, 2)
+
+    # Tipos de ingreso válidos para un lote (lo que entrega un proveedor):
+    #   NUEVO = Compra, REPOSICION = Reposición por garantía. Ambos traen equipos nuevos.
+    # Reingresos y devoluciones de equipos usados NO son lotes (tienen su propio flujo).
+    TIPOS_INGRESO_LOTE = ('NUEVO', 'REPOSICION')
+
+    @property
+    def recibe_equipos_nuevos(self):
+        return bool(self.tipo_ingreso_id) and self.tipo_ingreso.codigo in self.TIPOS_INGRESO_LOTE
+
+    # ---------- Reglas únicas de recepción (usar SIEMPRE estas) ----------
+    def siguiente_numero_entrega(self):
+        """Próximo número de entrega parcial (no depende del contador, que podía desfasarse)."""
+        ultimo = self.entregas_parciales.aggregate(m=models.Max('numero_entrega'))['m'] or 0
+        return ultimo + 1
+
+    def actualizar_estado_recepcion(self, guardar=True):
+        """
+        Recalcula el estado según lo REALMENTE recibido (materiales del lote) y
+        sincroniza el contador de entregas. Un lote cerrado no cambia de estado.
+          nada recibido -> REGISTRADO | parte -> RECEPCION_PARCIAL | todo -> RECEPCION_COMPLETA
+        """
+        # Olvidar detalles/entregas precargados: pudieron cambiar en esta misma petición
+        getattr(self, '_prefetched_objects_cache', {}).pop('detalles', None)
+        getattr(self, '_prefetched_objects_cache', {}).pop('entregas_parciales', None)
+        self.total_entregas_parciales = self.entregas_parciales.count()
+        if not (self.estado and self.estado.codigo == 'CERRADO'):
+            recibida, total = self.cantidad_recibida, self.cantidad_total
+            codigo = 'REGISTRADO' if recibida <= 0 else ('RECEPCION_COMPLETA' if total and recibida >= total else 'RECEPCION_PARCIAL')
+            nuevo = EstadoLote.objects.filter(codigo=codigo, activo=True).first()
+            if nuevo:
+                self.estado = nuevo
+        if guardar:
+            self.save(update_fields=['estado', 'total_entregas_parciales', 'updated_at'])
+        return self.estado
 
 
 class EntregaParcialLote(models.Model):
@@ -643,7 +703,21 @@ class LoteDetalle(models.Model):
 
     @property
     def cantidad_recibida(self):
-        return self.lote.material_set.filter(modelo=self.modelo).count()
+        es_unico = self.modelo.tipo_material.es_unico
+        # Si el listado ya lo precalculó (optimizar_lotes), no se consulta de nuevo
+        if '_rec_count' in self.__dict__:
+            if es_unico:
+                return self._rec_count
+            total = self._rec_sum or 0
+            return int(total) if total == int(total) else float(total)
+
+        materiales = self.lote.material_set.filter(modelo=self.modelo)
+        if es_unico:
+            # ONUs: 1 fila = 1 equipo
+            return materiales.count()
+        # Materiales a granel (cable, conectores): se suma la cantidad de cada ingreso
+        total = materiales.aggregate(total=models.Sum('cantidad'))['total'] or 0
+        return int(total) if total == int(total) else float(total)
 
     @property
     def cantidad_pendiente(self):
@@ -850,9 +924,11 @@ class Material(models.Model):
         if self.tipo_material.es_unico and not self.estado_onu:
             # Buscar estado por código para equipos únicos
             if self.es_nuevo:
+                # Si el modelo requiere inspección -> NUEVO (pendiente de laboratorio);
+                # si no, entra directo como DISPONIBLE.
+                codigo_inicial = 'NUEVO' if (not self.modelo_id or self.modelo.requiere_inspeccion_inicial) else 'DISPONIBLE'
                 try:
-                    estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
-                    self.estado_onu = estado_nuevo
+                    self.estado_onu = EstadoMaterialONU.objects.get(codigo=codigo_inicial, activo=True)
                 except EstadoMaterialONU.DoesNotExist:
                     pass
             else:
@@ -870,7 +946,23 @@ class Material(models.Model):
             except EstadoMaterialGeneral.DoesNotExist:
                 pass
 
+        es_nuevo_registro = self._state.adding
         super().save(*args, **kwargs)
+
+        # Primer movimiento del historial: el ingreso al almacén
+        responsable = getattr(self, '_usuario', None) or (self.lote.created_by if self.lote_id else None)
+        if es_nuevo_registro and responsable:  # el historial exige usuario responsable
+            estado = self.estado_onu if self.tipo_material.es_unico else self.estado_general
+            HistorialMaterial.objects.create(
+                material=self,
+                estado_anterior='',
+                estado_nuevo=(estado.codigo if estado else '')[:25],
+                almacen_anterior=None,
+                almacen_nuevo=self.almacen_actual,
+                motivo=(f'Ingreso por lote {self.lote.numero_lote}' if self.lote_id else 'Ingreso al almacén')[:100],
+                observaciones=f'Cantidad: {self.cantidad}' if not self.tipo_material.es_unico else '',
+                usuario_responsable=responsable,
+            )
 
     def _generar_codigo_interno(self):
         """Generar código interno único"""
@@ -898,6 +990,7 @@ class Material(models.Model):
         """Determinar si el material requiere ir a laboratorio"""
         if self.tipo_material.es_unico:
             return (self.es_nuevo and
+                    self.modelo.requiere_inspeccion_inicial and
                     self.tipo_origen.codigo == 'NUEVO' and
                     self.estado_onu and self.estado_onu.codigo == 'NUEVO')
         return False
@@ -919,6 +1012,7 @@ class Material(models.Model):
 
     def enviar_a_laboratorio(self, usuario=None):
         """Enviar material a laboratorio"""
+        anterior = self.estado_onu.codigo if self.estado_onu_id else ''
         if self.tipo_material.es_unico:
             try:
                 estado_laboratorio = EstadoMaterialONU.objects.get(codigo='EN_LABORATORIO', activo=True)
@@ -927,7 +1021,18 @@ class Material(models.Model):
                 pass
 
         self.fecha_envio_laboratorio = timezone.now()
+        self.fecha_retorno_laboratorio = None  # nuevo ciclo de laboratorio
         self.save()
+        if usuario:  # el historial exige usuario responsable
+            HistorialMaterial.objects.create(
+                material=self,
+                estado_anterior=anterior[:25],
+                estado_nuevo=(self.estado_onu.codigo if self.estado_onu_id else '')[:25],
+                almacen_anterior=self.almacen_actual,
+                almacen_nuevo=self.almacen_actual,
+                motivo='Enviado a laboratorio para inspección',
+                usuario_responsable=usuario,
+            )
 
     def retornar_de_laboratorio(self, resultado_exitoso=True, informe_numero=None, detalles=None):
         """Retornar material de laboratorio"""
@@ -1158,6 +1263,10 @@ class InspeccionLaboratorio(models.Model):
     # Información del proceso
     tecnico_revisor = models.CharField(max_length=50, blank=True)
     tiempo_inspeccion_minutos = models.PositiveIntegerField(default=0)
+    pruebas_aplicadas = models.JSONField(
+        default=list, blank=True,
+        help_text="Pruebas que se hicieron (según el modelo). Vacío = todas (registros anteriores)."
+    )
 
     # Auditoría
     fecha_inspeccion = models.DateTimeField(auto_now_add=True)
@@ -1172,3 +1281,9 @@ class InspeccionLaboratorio(models.Model):
 
     def __str__(self):
         return f"{self.numero_informe} - {self.material.codigo_interno}"
+
+    @property
+    def resultados_pruebas(self):
+        """[(nombre, ok)] solo de las pruebas que se hicieron."""
+        hechas = self.pruebas_aplicadas or CAMPOS_PRUEBA
+        return [(n, getattr(self, c)) for c, n, _ in PRUEBAS_LABORATORIO if c in hechas]

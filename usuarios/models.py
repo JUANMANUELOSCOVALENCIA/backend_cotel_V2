@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, connection, transaction
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -216,6 +216,38 @@ def crear_log_auditoria(usuario, accion, objeto, detalles=None, ip_address=None,
         return None
 
 
+# ========== TABLA EXTERNA DE EMPLEADOS (FDW) ==========
+
+FDW_TABLE = 'empleados_activos_fdw'
+
+
+def fdw_disponible():
+    """True si la tabla externa de empleados existe en la base de datos."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)", [FDW_TABLE])
+            return cursor.fetchone()[0] is not None
+    except Exception:
+        return False
+
+
+def fdw_consulta_segura(func, default=None):
+    """
+    Ejecuta una consulta a la tabla FDW sin romper la transacción actual.
+    En PostgreSQL, si una consulta falla dentro de una transacción, TODA la
+    transacción queda anulada ("current transaction is aborted"). Por eso se
+    ejecuta dentro de un savepoint (transaction.atomic) y solo si la tabla existe.
+    """
+    if not fdw_disponible():
+        return default
+    try:
+        with transaction.atomic():
+            return func()
+    except Exception as e:
+        print(f"Aviso FDW: {e}")
+        return default
+
+
 # ========== MANAGER OPTIMIZADO PARA USUARIOS ==========
 
 class UsuarioQuerySet(models.QuerySet):
@@ -299,12 +331,12 @@ class UsuarioManager(BaseUserManager):
             if self.with_deleted().filter(codigocotel=codigo_candidato).exists():
                 codigo_candidato += 1
                 continue
-            try:
-                if Empleado_fdw.objects.filter(codigocotel=codigo_candidato).exists():
-                    codigo_candidato += 1
-                    continue
-            except:
-                pass
+            if fdw_consulta_segura(
+                lambda: Empleado_fdw.objects.filter(codigocotel=codigo_candidato).exists(),
+                default=False
+            ):
+                codigo_candidato += 1
+                continue
             return codigo_candidato
 
     # Métodos de conveniencia

@@ -2,7 +2,7 @@ from decimal import Decimal
 from datetime import timedelta
 from django.contrib.auth import authenticate
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Count, Exists, OuterRef, Prefetch
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -18,8 +18,9 @@ from rest_framework.response import Response
 
 from .models import (
     Empleado_fdw, Usuario, Permission, Roles, AuditLog,
-    crear_log_auditoria
+    crear_log_auditoria, fdw_disponible, fdw_consulta_segura
 )
+from .permissions import PermisoPorRol, ProtegerUsuarios, ProtegerRoles
 from .serializers import (
     ChangePasswordSerializer, PermissionSerializer, RolesSerializer,
     UsuarioManualSerializer, UsuarioListSerializer, UsuarioDetailSerializer,
@@ -169,7 +170,7 @@ class LoginJWTView(APIView):
             usuario = Usuario.objects.get(codigocotel=codigocotel)
         except Usuario.DoesNotExist:
             return Response(
-                {"error": "Usuario no migrado. Diríjase al módulo de migración."},
+                {"error": "Este código no tiene usuario todavía. Usa «Activar mi cuenta»."},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -198,7 +199,7 @@ class LoginJWTView(APIView):
             )
 
             return Response(
-                {"error": "Credenciales inválidas."},
+                {"error": "Código o contraseña incorrectos."},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
@@ -333,7 +334,7 @@ class AuditLogViewSet(ModelViewSet):
     """ViewSet para consulta de logs de auditoría"""
     queryset = AuditLog.objects.all().select_related('usuario')
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
+    permission_classes = [PermisoPorRol]  # recurso "logs"
     pagination_class = StandardPagination
     basename = 'logs'
     http_method_names = ['get']
@@ -398,16 +399,29 @@ class AuditLogViewSet(ModelViewSet):
             'por_accion': por_accion
         })
 
+def permisos_optimizados(qs):
+    """Añade creado_por (JOIN) y _en_uso (EXISTS) a un queryset de permisos."""
+    return qs.select_related('creado_por').annotate(
+        _en_uso=Exists(Roles.objects.filter(permisos=OuterRef('pk'), activo=True, eliminado=False))
+    )
+
+
 class PermissionViewSet(ModelViewSet):
     """ViewSet para gestión de permisos"""
     queryset = Permission.objects.all().order_by('recurso', 'accion')
     serializer_class = PermissionSerializer
-    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
+    permission_classes = [PermisoPorRol]  # recurso "permisos"
+    # Quien administra roles necesita ver el catálogo de permisos para asignarlos
+    lectura_alternativa = [('roles', 'leer')]
     pagination_class = StandardPagination
     basename = 'permisos'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['recurso', 'accion', 'activo']
     search_fields = ['recurso', 'descripcion']
+
+    def get_queryset(self):
+        # creado_por en el mismo JOIN y "esta_en_uso" calculado por SQL (evita 1 consulta por permiso)
+        return permisos_optimizados(super().get_queryset())
 
     def destroy(self, request, *args, **kwargs):
         """Soft delete para permisos"""
@@ -477,7 +491,9 @@ class RolesViewSet(ModelViewSet):
     """ViewSet para gestión de roles"""
     queryset = Roles.objects.all().select_related('creado_por').prefetch_related('permisos')
     serializer_class = RolesSerializer
-    permission_classes = [IsAuthenticated]  # ← SOLO IsAuthenticated
+    permission_classes = [ProtegerRoles]  # recurso "roles" + no editar el propio rol
+    # Quien administra usuarios necesita la lista de roles para asignarlos
+    lectura_alternativa = [('usuarios', 'leer')]
     pagination_class = StandardPagination
     basename = 'roles'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -488,6 +504,14 @@ class RolesViewSet(ModelViewSet):
     def get_queryset(self):
         """Filtros adicionales"""
         queryset = super().get_queryset()
+        # Permisos anidados y contadores en pocas consultas (antes: ~40 por rol)
+        queryset = queryset.prefetch_related(None).prefetch_related(
+            Prefetch('permisos', queryset=permisos_optimizados(Permission.objects.order_by('id')))
+        ).annotate(
+            _cant_usuarios=Count('usuario', filter=Q(usuario__is_active=True, usuario__eliminado=False), distinct=True),
+            _cant_permisos=Count('permisos', filter=Q(permisos__activo=True, permisos__eliminado=False), distinct=True),
+            _tiene_usuarios=Exists(Usuario.objects.filter(rol=OuterRef('pk'), is_active=True, eliminado=False)),
+        ).order_by('nombre')
 
         con_usuarios = self.request.query_params.get('con_usuarios', None)
         if con_usuarios is not None:
@@ -618,7 +642,7 @@ class RolesViewSet(ModelViewSet):
 
 class UsuarioViewSet(ModelViewSet):
     """ViewSet para gestión de usuarios"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [ProtegerUsuarios]  # recurso "usuarios" + protección contra autoescalada
     pagination_class = StandardPagination
     basename = 'usuarios'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -636,15 +660,12 @@ class UsuarioViewSet(ModelViewSet):
         if eliminados_only:
             # NUEVO: Solo usuarios eliminados
             queryset = Usuario.objects.deleted_only().select_related('rol', 'creado_por', 'eliminado_por')
-            print("🗑️ Aplicando filtro: SOLO eliminados")
         elif with_deleted:
             # Incluir eliminados con activos
             queryset = Usuario.objects.with_deleted().select_related('rol', 'creado_por', 'eliminado_por')
-            print("📋 Aplicando filtro: Incluyendo eliminados")
         else:
             # Solo usuarios activos (comportamiento por defecto)
-            queryset = Usuario.objects.all().select_related('rol', 'creado_por')
-            print("✅ Aplicando filtro: Solo activos")
+            queryset = Usuario.objects.all().select_related('rol', 'creado_por', 'eliminado_por')
 
         # Resto de filtros existentes...
         tipo = self.request.query_params.get('tipo', None)
@@ -667,6 +688,9 @@ class UsuarioViewSet(ModelViewSet):
         if bloqueado == 'true':
             queryset = queryset.filter(bloqueado_hasta__gt=timezone.now())
 
+        # Orden fijo: sin él la paginación puede repetir u omitir usuarios entre páginas
+        if not queryset.ordered:
+            queryset = queryset.order_by('nombres', 'apellidopaterno', 'id')
         return queryset
 
     def get_serializer_class(self):
@@ -690,19 +714,13 @@ class UsuarioViewSet(ModelViewSet):
                 serializer = self.get_serializer(page, many=True)
 
                 # Enriquecer datos con información de eliminación
+                # (se usan los objetos ya cargados de la página; antes se volvía a
+                #  consultar cada usuario a la BD = 1 consulta extra por fila)
                 enriched_data = []
-                for item in serializer.data:
-                    # Buscar el usuario completo para verificar si está eliminado
-                    try:
-                        user = Usuario.objects.with_deleted().get(id=item['id'])
-                        item['eliminado'] = user.eliminado
-                        item[
-                            'fecha_eliminacion'] = user.fecha_eliminacion.isoformat() if user.fecha_eliminacion else None
-                        item[
-                            'eliminado_por_nombre'] = user.eliminado_por.nombre_completo if user.eliminado_por else None
-                    except Usuario.DoesNotExist:
-                        item['eliminado'] = False
-
+                for user, item in zip(page, serializer.data):
+                    item['eliminado'] = user.eliminado
+                    item['fecha_eliminacion'] = user.fecha_eliminacion.isoformat() if user.fecha_eliminacion else None
+                    item['eliminado_por_nombre'] = user.eliminado_por.nombre_completo if user.eliminado_por else None
                     enriched_data.append(item)
 
                 # Crear respuesta paginada con datos enriquecidos
@@ -1080,7 +1098,12 @@ class UsuarioViewSet(ModelViewSet):
 class EmpleadosDisponiblesViewSet(ModelViewSet):
     """ViewSet para empleados FDW disponibles para migración - SIN AUTENTICACIÓN"""
     serializer_class = EmpleadoDisponibleSerializer
-    permission_classes = []  # Sin autenticación - usuarios nuevos no pueden loguearse
+    # Solo usuarios logueados: leer requiere usuarios/leer y migrar (POST) usuarios/crear.
+    # (Antes estaba abierto: cualquiera en la red podía crear un usuario con rol Administrador.)
+    # El autorregistro del empleado sigue funcionando por /usuarios/migrar/ (rol básico).
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'usuarios'
+    accion_permiso = {'GET': 'leer', 'POST': 'crear'}
     pagination_class = StandardPagination
     basename = 'empleados-disponibles'
     http_method_names = ['get', 'post']  # Solo lectura y migración
@@ -1089,6 +1112,9 @@ class EmpleadosDisponiblesViewSet(ModelViewSet):
 
     def get_queryset(self):
         """Solo empleados activos no migrados"""
+        if not fdw_disponible():
+            # Tabla externa de empleados aún no configurada
+            return Empleado_fdw.objects.none()
         try:
             # Obtener códigos ya migrados
             codigos_migrados = Usuario.objects.with_deleted().values_list('codigocotel', flat=True)
@@ -1130,11 +1156,14 @@ class EmpleadosDisponiblesViewSet(ModelViewSet):
     def estadisticas(self, request):
         """Estadísticas de migración"""
         try:
-            total_empleados_fdw = Empleado_fdw.objects.filter(estadoempleado=0).count()
+            total_empleados_fdw = fdw_consulta_segura(
+                lambda: Empleado_fdw.objects.filter(estadoempleado=0).count(), default=0
+            )
             total_migrados = Usuario.objects.migrados().count()
             total_disponibles = self.get_queryset().count()
 
             return Response({
+                "fdw_configurado": fdw_disponible(),
                 "total_empleados_fdw": total_empleados_fdw,
                 "total_migrados": total_migrados,
                 "total_disponibles": total_disponibles,
@@ -1152,7 +1181,9 @@ class EmpleadosDisponiblesViewSet(ModelViewSet):
 
 class ResetPasswordAdminView(APIView):
     """Vista para resetear contraseñas por administrador"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]  # resetear contraseñas = usuarios/actualizar
+    recurso_permiso = 'usuarios'
+    accion_permiso = 'actualizar'
 
     def post(self, request, *args, **kwargs):
         """Resetear contraseña de un usuario por ID"""
@@ -1240,7 +1271,9 @@ class UsuarioPerfilView(APIView):
 
 class ValidarCodigoCotelView(APIView):
     """Vista para validar disponibilidad de código COTEL"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]  # se usa al crear usuarios
+    recurso_permiso = 'usuarios'
+    accion_permiso = 'crear'
 
     def post(self, request, *args, **kwargs):
         """Validar si un código COTEL está disponible"""
@@ -1267,15 +1300,12 @@ class ValidarCodigoCotelView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        # Verificar en tabla FDW
-        try:
-            if Empleado_fdw.objects.filter(codigocotel=codigocotel).exists():
-                return Response(
-                    {"disponible": False, "motivo": "Código existe en sistema de empleados"},
-                    status=status.HTTP_200_OK
-                )
-        except:
-            pass
+        # Verificar en tabla FDW (si existe)
+        if fdw_consulta_segura(lambda: Empleado_fdw.objects.filter(codigocotel=codigocotel).exists(), default=False):
+            return Response(
+                {"disponible": False, "motivo": "Código existe en sistema de empleados"},
+                status=status.HTTP_200_OK
+            )
 
         return Response(
             {"disponible": True, "motivo": "Código disponible"},
@@ -1285,7 +1315,9 @@ class ValidarCodigoCotelView(APIView):
 
 class GenerarCodigoCotelView(APIView):
     """Vista para generar código COTEL disponible"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]  # se usa al crear usuarios
+    recurso_permiso = 'usuarios'
+    accion_permiso = 'crear'
 
     def post(self, request, *args, **kwargs):
         """Generar un código COTEL disponible"""
@@ -1317,7 +1349,9 @@ class GenerarCodigoCotelView(APIView):
 
 class EstadisticasUsuariosView(APIView):
     """Vista para estadísticas generales del sistema - ACTUALIZADA"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]  # estadísticas de usuarios
+    recurso_permiso = 'usuarios'
+    accion_permiso = 'leer'
 
     def get(self, request, *args, **kwargs):
         """Obtener estadísticas del sistema incluyendo usuarios eliminados"""
@@ -1326,7 +1360,7 @@ class EstadisticasUsuariosView(APIView):
             from datetime import timedelta
 
             # Obtener fechas para filtros temporales
-            hoy = timezone.now().date()
+            hoy = timezone.localdate()
             hace_una_semana = hoy - timedelta(days=7)
             hace_un_mes = hoy - timedelta(days=30)
 
@@ -1427,8 +1461,10 @@ class EstadisticasUsuariosView(APIView):
             # ========== ESTADÍSTICAS DE MIGRACIÓN ==========
 
             try:
-                # Total empleados disponibles en FDW
-                total_empleados_fdw = Empleado_fdw.objects.filter(estadoempleado=0).count()
+                # Total empleados disponibles en FDW (0 si la tabla no existe)
+                total_empleados_fdw = fdw_consulta_segura(
+                    lambda: Empleado_fdw.objects.filter(estadoempleado=0).count(), default=0
+                )
 
                 # Porcentaje de migración (incluyendo eliminados)
                 total_usuarios_sistema = Usuario.objects.with_deleted().count()

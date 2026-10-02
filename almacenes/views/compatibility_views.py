@@ -7,11 +7,14 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
+from ..borrado import BorradoSeguroMixin
 from django_filters.rest_framework import DjangoFilterBackend
 
 from ..models import (
     Marca,Modelo,Componente, ModeloComponente
 )
+from ..optimizaciones import optimizar_marcas, optimizar_modelos
 from ..serializers import (
     MarcaSerializer, ModeloSerializer, ComponenteSerializer, ModeloComponenteSerializer, ModeloCreateUpdateSerializer,
     ComponenteCreateUpdateSerializer
@@ -19,11 +22,12 @@ from ..serializers import (
 
 # ========== VIEWSETS ACTUALIZADOS DE MODELOS BÁSICOS ==========
 
-class MarcaViewSet(viewsets.ModelViewSet):
+class MarcaViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
     """ViewSet actualizado para marcas"""
     queryset = Marca.objects.all()
     serializer_class = MarcaSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'descripcion']
@@ -38,6 +42,8 @@ class MarcaViewSet(viewsets.ModelViewSet):
         if not incluir_inactivos:
             queryset = queryset.filter(activo=True)
 
+        if self.action == 'list':
+            queryset = optimizar_marcas(queryset)  # contadores en la misma consulta
         return queryset
 
     @action(detail=True, methods=['post'])
@@ -60,11 +66,14 @@ class MarcaViewSet(viewsets.ModelViewSet):
         serializer = ModeloSerializer(modelos, many=True)
         return Response(serializer.data)
 
-class ModeloViewSet(viewsets.ModelViewSet):
+class ModeloViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+    borrado_permitido = ('almacenes.ModeloComponente',)  # el contenido de la caja se borra con el modelo
     """ViewSet actualizado para modelos con soporte de materiales múltiples"""
     queryset = Modelo.objects.all().select_related('marca', 'tipo_material', 'unidad_medida')
     serializer_class = ModeloSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
+    acciones_permiso = {'remover_componente': 'actualizar', 'agregar_masivo': 'actualizar'}
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'marca__nombre', 'codigo_modelo']
@@ -79,6 +88,8 @@ class ModeloViewSet(viewsets.ModelViewSet):
         if not incluir_inactivos:
             queryset = queryset.filter(activo=True)
 
+        if self.action == 'list':
+            queryset = optimizar_modelos(queryset)  # contadores en la misma consulta
         return queryset
 
     def get_serializer_class(self):
@@ -243,7 +254,8 @@ class ComponenteViewSet(viewsets.ModelViewSet):
     """ViewSet actualizado para componentes"""
     queryset = Componente.objects.all()
     serializer_class = ComponenteSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nombre', 'descripcion']
@@ -262,6 +274,23 @@ class ComponenteViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update']:
             return ComponenteCreateUpdateSerializer
         return ComponenteSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        """No permitir eliminar un componente que está asignado a modelos"""
+        componente = self.get_object()
+        usos = componente.modelocomponente_set.count()
+        if usos:
+            return Response(
+                {'error': f'No se puede eliminar "{componente.nombre}": está asignado a {usos} modelo(s). Desactívalo o quítalo de esos modelos primero.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        componente = serializer.save()
+        return Response(ComponenteSerializer(componente).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def toggle_activo(self, request, pk=None):
@@ -343,7 +372,8 @@ class ModeloComponenteViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de relaciones modelo-componente"""
     queryset = ModeloComponente.objects.all().select_related('modelo__marca', 'componente')
     serializer_class = ModeloComponenteSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = LECTURA_ALMACENES
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['modelo', 'componente']

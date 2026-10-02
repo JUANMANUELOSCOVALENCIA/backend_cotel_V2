@@ -15,9 +15,12 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from ..permisos import PermisoPorRol, LECTURA_ALMACENES
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
 
+from ..optimizaciones import optimizar_lotes
+from ..borrado import BorradoSeguroMixin
 from ..models import (
     Lote, LoteDetalle, EntregaParcialLote, Material, Almacen,
     TipoIngreso, EstadoLote, TipoMaterial, EstadoMaterialONU, Modelo,
@@ -30,13 +33,16 @@ from ..serializers import (
 )
 
 
-class LoteViewSet(viewsets.ModelViewSet):
+class LoteViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+    # Un lote con equipos/materiales no se borra (antes se borraban en cascada)
+    borrado_permitido = ('almacenes.LoteDetalle', 'almacenes.EntregaParcialLote')
+    sugerencia_borrado = 'Si ya no se usará, ciérralo.'
     """ViewSet para gestión completa de lotes"""
     queryset = Lote.objects.all().select_related(
         'proveedor', 'almacen_destino', 'tipo_servicio', 'created_by',
         'tipo_ingreso', 'estado'
     ).prefetch_related('detalles__modelo__marca')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
 
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
@@ -47,6 +53,11 @@ class LoteViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['numero_lote', 'fecha_recepcion', 'created_at']
     ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # En el listado, detalles/entregas/cantidades en pocas consultas
+        return optimizar_lotes(qs) if self.action == 'list' else qs
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -81,7 +92,7 @@ class LoteViewSet(viewsets.ModelViewSet):
         cantidad_pendiente = lote.cantidad_pendiente
 
         # Información de la próxima entrega
-        proxima_entrega = lote.total_entregas_parciales + 1
+        proxima_entrega = lote.siguiente_numero_entrega()
 
         # Verificar si el lote es de recepción completa o parcial
         tiene_entregas_parciales = lote.total_entregas_parciales > 0
@@ -144,7 +155,7 @@ class LoteViewSet(viewsets.ModelViewSet):
                 'requiere_numero_entrega': tiene_entregas_parciales or cantidad_pendiente < cantidad_total,
                 'entrega_sugerida': proxima_entrega if cantidad_pendiente > 0 else None,
                 'permite_importacion': cantidad_pendiente > 0,
-                'es_lote_nuevo': lote.tipo_ingreso.codigo == 'NUEVO' if lote.tipo_ingreso else False
+                'es_lote_nuevo': lote.recibe_equipos_nuevos
             }
         })
 
@@ -173,6 +184,7 @@ class LoteViewSet(viewsets.ModelViewSet):
                     if count > 0:
                         estados_info[estado.nombre] = count
 
+            recibida_modelo = detalle.cantidad_recibida  # ONU: equipos; granel: suma de cantidades
             detalles_info.append({
                 'modelo_id': detalle.modelo.id,
                 'modelo_nombre': f"{detalle.modelo.marca.nombre} {detalle.modelo.nombre}",
@@ -180,11 +192,11 @@ class LoteViewSet(viewsets.ModelViewSet):
                 'tipo_material': detalle.modelo.tipo_material.nombre if detalle.modelo.tipo_material else 'Sin tipo',
                 'unidad_medida': detalle.modelo.unidad_medida.simbolo if detalle.modelo.unidad_medida else 'N/A',
                 'cantidad_esperada': detalle.cantidad,
-                'cantidad_recibida': materiales_del_modelo.count(),
-                'cantidad_pendiente': max(0, detalle.cantidad - materiales_del_modelo.count()),
-                'porcentaje_recibido': round(
-                    (materiales_del_modelo.count() / detalle.cantidad * 100), 2
-                ) if detalle.cantidad > 0 else 0,
+                'es_unico': detalle.modelo.tipo_material.es_unico,
+                'requiere_inspeccion': detalle.modelo.requiere_inspeccion_inicial,
+                'cantidad_recibida': recibida_modelo,
+                'cantidad_pendiente': max(0, detalle.cantidad - recibida_modelo),
+                'porcentaje_recibido': round(min(100, recibida_modelo / detalle.cantidad * 100), 2) if detalle.cantidad > 0 else 0,
                 'estados_materiales': estados_info
             })
 
@@ -244,28 +256,19 @@ class LoteViewSet(viewsets.ModelViewSet):
 
         data = request.data.copy()
         data['lote'] = lote.id
-        data['numero_entrega'] = lote.total_entregas_parciales + 1
+        data['numero_entrega'] = lote.siguiente_numero_entrega()
+        if not data.get('estado_entrega'):
+            estado = EstadoLote.objects.filter(codigo='ACTIVO', activo=True).first()
+            if estado:
+                data['estado_entrega'] = estado.id
 
         serializer = EntregaParcialLoteSerializer(data=data)
         if serializer.is_valid():
             with transaction.atomic():
                 entrega = serializer.save(created_by=request.user)
 
-                # Actualizar contador en el lote
-                lote.total_entregas_parciales += 1
-
-                # Actualizar estado del lote según las entregas
-                try:
-                    if lote.cantidad_recibida >= lote.cantidad_total:
-                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
-                        lote.estado = estado_completa
-                    else:
-                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
-                        lote.estado = estado_parcial
-                except EstadoLote.DoesNotExist:
-                    pass
-
-                lote.save()
+                # Contador y estado del lote (regla única en el modelo)
+                lote.actualizar_estado_recepcion()
 
             return Response(
                 EntregaParcialLoteSerializer(entrega).data,
@@ -463,33 +466,8 @@ class LoteViewSet(viewsets.ModelViewSet):
                         numero_entrega_parcial=entrega_posterior.numero_entrega + 1
                     ).update(numero_entrega_parcial=nuevo_numero)
 
-            # Actualizar contador del lote
-            lote.total_entregas_parciales = max(0, lote.total_entregas_parciales - 1)
-
-            # Actualizar estado del lote
-            try:
-                entregas_restantes = lote.entregas_parciales.count()
-                if entregas_restantes == 0:
-                    estado_registrado = EstadoLote.objects.get(codigo='REGISTRADO', activo=True)
-                    lote.estado = estado_registrado
-                else:
-                    # Recalcular estado basado en entregas restantes
-                    total_en_entregas = sum(e.cantidad_entregada for e in lote.entregas_parciales.all())
-                    total_materiales_restantes = Material.objects.filter(lote=lote).count()
-
-                    if total_materiales_restantes == 0:
-                        estado_registrado = EstadoLote.objects.get(codigo='REGISTRADO', activo=True)
-                        lote.estado = estado_registrado
-                    elif total_en_entregas >= lote.cantidad_total:
-                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
-                        lote.estado = estado_completa
-                    else:
-                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
-                        lote.estado = estado_parcial
-            except EstadoLote.DoesNotExist:
-                pass
-
-            lote.save()
+            # Contador y estado del lote (regla única en el modelo)
+            lote.actualizar_estado_recepcion()
 
             print(f"✅ BACKEND: Operación completada exitosamente")
 
@@ -510,6 +488,49 @@ class LoteViewSet(viewsets.ModelViewSet):
             'nuevo_estado_lote': lote.estado.nombre if lote.estado else 'Sin estado'
         })
 
+    def _revisar_cierre(self, lote):
+        """
+        Revisa si el lote se puede cerrar.
+        - bloqueos: impiden cerrar (equipos que aún no terminan su paso por laboratorio)
+        - advertencias: se puede cerrar confirmando y dando un motivo (faltantes del proveedor)
+        """
+        bloqueos = []
+        advertencias = []
+
+        pendientes_lab = lote.material_set.filter(
+            tipo_material__es_unico=True,
+            estado_onu__codigo='NUEVO',
+            modelo__requiere_inspeccion_inicial=True,
+        ).count()
+        en_lab = lote.material_set.filter(estado_onu__codigo='EN_LABORATORIO').count()
+
+        if pendientes_lab:
+            bloqueos.append(f'{pendientes_lab} equipo(s) están en estado NUEVO y todavía no se enviaron a laboratorio.')
+        if en_lab:
+            bloqueos.append(f'{en_lab} equipo(s) siguen EN LABORATORIO sin resultado de inspección.')
+
+        for detalle in lote.detalles.select_related('modelo__marca', 'modelo__unidad_medida').all():
+            pendiente = detalle.cantidad_pendiente
+            if pendiente > 0:
+                simbolo = detalle.modelo.unidad_medida.simbolo if detalle.modelo.unidad_medida else 'u.'
+                advertencias.append(
+                    f'{detalle.modelo.marca.nombre} {detalle.modelo.nombre}: faltan {pendiente} {simbolo} '
+                    f'(recibido {detalle.cantidad_recibida} de {detalle.cantidad}).'
+                )
+
+        return {
+            'puede_cerrar': not bloqueos,
+            'requiere_confirmacion': bool(advertencias),
+            'bloqueos': bloqueos,
+            'advertencias': advertencias,
+        }
+
+    @action(detail=True, methods=['get'])
+    def validar_cierre(self, request, pk=None):
+        """Previsualiza qué impide o advierte el cierre del lote"""
+        lote = self.get_object()
+        return Response({'lote': lote.numero_lote, **self._revisar_cierre(lote)})
+
     @action(detail=True, methods=['post'])
     def cerrar_lote(self, request, pk=None):
         """Cerrar lote (no se pueden agregar más materiales)"""
@@ -528,8 +549,37 @@ class LoteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+        # Validaciones antes de cerrar
+        revision = self._revisar_cierre(lote)
+        if revision['bloqueos']:
+            return Response(
+                {'error': 'No se puede cerrar el lote todavía.', **revision},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        forzar = str(request.data.get('forzar', '')).lower() in ('true', '1')
+        motivo = (request.data.get('motivo') or '').strip()
+        if revision['advertencias']:
+            if not forzar:
+                return Response(
+                    {'error': 'El lote tiene cantidades pendientes. Confirma el cierre indicando un motivo.', **revision},
+                    status=status.HTTP_409_CONFLICT
+                )
+            if len(motivo) < 5:
+                return Response(
+                    {'error': 'Indica un motivo de al menos 5 caracteres para cerrar con faltantes.', **revision},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         with transaction.atomic():
             lote.estado = estado_cerrado
+            if revision['advertencias']:
+                nota = (
+                    f"[{timezone.now():%d/%m/%Y %H:%M}] Cerrado con faltantes por "
+                    f"{getattr(request.user, 'nombre_completo', request.user)}. Motivo: {motivo}. "
+                    + ' '.join(revision['advertencias'])
+                )
+                lote.observaciones = f"{lote.observaciones}\n{nota}".strip() if lote.observaciones else nota
             lote.save()
 
         return Response({
@@ -565,8 +615,8 @@ class LoteViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            lote.estado = estado_activo
-            lote.save()
+            lote.estado = estado_activo  # deja de estar cerrado...
+            lote.actualizar_estado_recepcion()  # ...y toma el estado según lo recibido
 
         return Response({
             'message': f'Lote {lote.numero_lote} reabierto correctamente',
@@ -647,9 +697,9 @@ class LoteViewSet(viewsets.ModelViewSet):
             tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
             estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
 
-            if lote.tipo_ingreso != tipo_nuevo:
+            if not lote.recibe_equipos_nuevos:
                 return Response(
-                    {'error': 'Solo los lotes nuevos requieren inspección inicial'},
+                    {'error': 'Solo los lotes de compra o reposición requieren inspección inicial'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         except (TipoIngreso.DoesNotExist, TipoMaterial.DoesNotExist, EstadoMaterialONU.DoesNotExist):
@@ -662,7 +712,8 @@ class LoteViewSet(viewsets.ModelViewSet):
         materiales_nuevos = lote.material_set.filter(
             tipo_material=tipo_onu,
             es_nuevo=True,
-            estado_onu=estado_nuevo
+            estado_onu=estado_nuevo,
+            modelo__requiere_inspeccion_inicial=True  # solo modelos que exigen inspección
         )
 
         if not materiales_nuevos.exists():
@@ -764,12 +815,13 @@ class LoteViewSet(viewsets.ModelViewSet):
                             cantidad=cantidad_pendiente,
                             codigo_item_equipo=request.data.get('codigo_item_equipo', ''),
                             estado_general=estado_disponible,
-                            es_nuevo=lote.tipo_ingreso.codigo == 'NUEVO',
+                            es_nuevo=lote.recibe_equipos_nuevos,
                             tipo_origen=lote.tipo_ingreso,
                             observaciones=f"Auto-completado: {cantidad_pendiente} {detalle.modelo.unidad_medida.simbolo if detalle.modelo.unidad_medida else 'unidades'}"
                         )
                         materiales_creados.append(material)
 
+            lote.actualizar_estado_recepcion()
             return Response({
                 'message': f'{len(materiales_creados)} materiales auto-completados',
                 'materiales_creados': len(materiales_creados)
@@ -782,7 +834,9 @@ class LoteViewSet(viewsets.ModelViewSet):
 
 class ImportacionMasivaView(APIView):
     """View para importación masiva de materiales desde Excel/CSV - SOPORTE DUAL"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'materiales'
+    accion_permiso = {'GET': 'leer', 'POST': 'crear'}  # importar = crear materiales
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
@@ -947,6 +1001,16 @@ class ImportacionMasivaView(APIView):
             gpon_duplicados = set()
             dsn_duplicados = set()
 
+            # Seriales que ya existen en el sistema: 3 consultas en total (antes 3 por fila)
+            def _col(nombre, upper=False):
+                if nombre not in df.columns:
+                    return []
+                vals = [str(v).strip() for v in df[nombre] if pd.notna(v) and str(v).strip()]
+                return [v.upper().replace('-', ':') for v in vals] if upper else vals
+            macs_existentes = set(Material.objects.filter(mac_address__in=_col('MAC', True)).values_list('mac_address', flat=True))
+            gpon_existentes = set(Material.objects.filter(gpon_serial__in=_col('GPON_SN')).values_list('gpon_serial', flat=True))
+            dsn_existentes = set(Material.objects.filter(serial_manufacturer__in=_col('D_SN')).values_list('serial_manufacturer', flat=True))
+
             for index, row in df.iterrows():
                 fila_num = index + 2
                 errores_fila = []
@@ -1014,17 +1078,12 @@ class ImportacionMasivaView(APIView):
                             dsn_duplicados.add(d_sn)
 
                 # ✅ VERIFICAR DUPLICADOS EN BASE DE DATOS (solo si no es validación)
-                if not errores_fila and not es_validacion:
-                    # MAC siempre verificar (obligatorio)
-                    if Material.objects.filter(mac_address=mac).exists():
+                if not errores_fila:  # también al validar, para no sorprender al importar
+                    if mac in macs_existentes:
                         errores_fila.append('MAC ya existe en el sistema')
-
-                    # GPON siempre verificar (obligatorio)
-                    if Material.objects.filter(gpon_serial=gpon_sn).exists():
+                    if gpon_sn in gpon_existentes:
                         errores_fila.append('GPON Serial ya existe en el sistema')
-
-                    # D_SN solo verificar si tiene valor
-                    if d_sn and Material.objects.filter(serial_manufacturer=d_sn).exists():
+                    if d_sn and d_sn in dsn_existentes:
                         errores_fila.append('D-SN ya existe en el sistema')
 
                 # Registrar errores o equipos válidos
@@ -1132,6 +1191,14 @@ class ImportacionMasivaView(APIView):
                     estado_nuevo = EstadoMaterialONU.objects.get(codigo='NUEVO', activo=True)
                     tipo_ingreso_nuevo = TipoIngreso.objects.get(codigo='NUEVO', activo=True)
 
+                    # Estado inicial según el modelo:
+                    #  - requiere inspección -> NUEVO (luego se envía a laboratorio)
+                    #  - no requiere        -> DISPONIBLE directo
+                    if modelo.requiere_inspeccion_inicial:
+                        estado_inicial = estado_nuevo
+                    else:
+                        estado_inicial = EstadoMaterialONU.objects.get(codigo='DISPONIBLE', activo=True)
+
                     print(f"✅ Referencias obtenidas:")
                     print(f"   Tipo ONU: {tipo_onu}")
                     print(f"   Estado NUEVO: {estado_nuevo}")
@@ -1166,7 +1233,7 @@ class ImportacionMasivaView(APIView):
 
                             # Ubicación y estado
                             almacen_actual=lote.almacen_destino,
-                            estado_onu=estado_nuevo,
+                            estado_onu=estado_inicial,
 
                             # Control de origen
                             es_nuevo=True,
@@ -1211,7 +1278,7 @@ class ImportacionMasivaView(APIView):
                                 )
 
                                 # Actualizar observaciones
-                                nueva_observacion = f"Importados {importados} equipos el {timezone.now().date()}"
+                                nueva_observacion = f"Importados {importados} equipos el {timezone.localdate()}"
                                 if entrega_parcial.observaciones:
                                     entrega_parcial.observaciones += f" | {nueva_observacion}"
                                 else:
@@ -1248,7 +1315,7 @@ class ImportacionMasivaView(APIView):
                                 lote=lote,
                                 numero_entrega=siguiente_numero,
                                 cantidad_entregada=importados,
-                                fecha_entrega=timezone.now().date(),
+                                fecha_entrega=timezone.localdate(),
                                 estado_entrega=estado_activo,
                                 observaciones=f"Entrega automática - Importados {importados} equipos"
                             )
@@ -1268,38 +1335,8 @@ class ImportacionMasivaView(APIView):
                             'error': f'Error procesando entrega parcial: {str(e)}'
                         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-                # ✅ ACTUALIZAR ESTADO DEL LOTE BASADO EN ENTREGAS REALES
-                try:
-                    print(f"📊 Actualizando estado del lote...")
-
-                    # Calcular total entregado basado en entregas parciales
-                    total_entregado_entregas = EntregaParcialLote.objects.filter(
-                        lote=lote
-                    ).aggregate(total=Sum('cantidad_entregada'))['total'] or 0
-
-                    print(f"📊 Total en entregas parciales: {total_entregado_entregas}/{lote.cantidad_total}")
-
-                    # Actualizar estado según el progreso real
-                    if total_entregado_entregas >= lote.cantidad_total:
-                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
-                        lote.estado = estado_completa
-                        print(f"✅ Lote completado: {estado_completa.nombre}")
-                    elif total_entregado_entregas > 0:
-                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
-                        lote.estado = estado_parcial
-                        print(f"✅ Lote parcial: {estado_parcial.nombre}")
-                    else:
-                        # Mantener estado actual si no hay entregas
-                        print(
-                            f"ℹ️ Sin entregas registradas, manteniendo estado: {lote.estado.nombre if lote.estado else 'Sin estado'}")
-
-                    lote.save()
-                    print(f"✅ Estado del lote actualizado: {lote.estado.nombre}")
-
-                except EstadoLote.DoesNotExist as e:
-                    print(f"⚠️ Estado de lote no encontrado: {e}")
-                except Exception as e:
-                    print(f"⚠️ Error actualizando estado del lote: {e}")
+                # Estado del lote y contador de entregas según lo realmente recibido
+                lote.actualizar_estado_recepcion()
 
                 # Actualizar estadísticas del resultado
                 resultado['importados'] = importados
@@ -1534,7 +1571,7 @@ class ImportacionMasivaView(APIView):
                             estado_general=estado_disponible,
 
                             # Control de origen
-                            es_nuevo=lote.tipo_ingreso.codigo == 'NUEVO' if lote.tipo_ingreso else True,
+                            es_nuevo=lote.recibe_equipos_nuevos,
                             tipo_origen=tipo_ingreso,
 
                             # Campos específicos para equipos únicos (vacíos para materiales no únicos)
@@ -1580,7 +1617,7 @@ class ImportacionMasivaView(APIView):
                                 )
 
                                 # Actualizar observaciones
-                                nueva_observacion = f"Importados {importados} lotes de materiales (cantidad total: {cantidad_total_importada}) el {timezone.now().date()}"
+                                nueva_observacion = f"Importados {importados} lotes de materiales (cantidad total: {cantidad_total_importada}) el {timezone.localdate()}"
                                 if entrega_parcial.observaciones:
                                     entrega_parcial.observaciones += f" | {nueva_observacion}"
                                 else:
@@ -1617,7 +1654,7 @@ class ImportacionMasivaView(APIView):
                                 lote=lote,
                                 numero_entrega=siguiente_numero,
                                 cantidad_entregada=int(cantidad_total_importada),  # ✅ Usar cantidad total
-                                fecha_entrega=timezone.now().date(),
+                                fecha_entrega=timezone.localdate(),
                                 estado_entrega=estado_activo,
                                 observaciones=f"Entrega automática - {importados} lotes de materiales (cantidad total: {cantidad_total_importada})"
                             )
@@ -1638,34 +1675,8 @@ class ImportacionMasivaView(APIView):
                             'error': f'Error procesando entrega parcial: {str(e)}'
                         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-                # ✅ ACTUALIZAR ESTADO DEL LOTE
-                try:
-                    print(f"📊 Actualizando estado del lote...")
-
-                    # Calcular total entregado basado en entregas parciales
-                    total_entregado_entregas = EntregaParcialLote.objects.filter(
-                        lote=lote
-                    ).aggregate(total=Sum('cantidad_entregada'))['total'] or 0
-
-                    print(f"📊 Total en entregas parciales: {total_entregado_entregas}/{lote.cantidad_total}")
-
-                    # Actualizar estado según el progreso real
-                    if total_entregado_entregas >= lote.cantidad_total:
-                        estado_completa = EstadoLote.objects.get(codigo='RECEPCION_COMPLETA', activo=True)
-                        lote.estado = estado_completa
-                        print(f"✅ Lote completado: {estado_completa.nombre}")
-                    elif total_entregado_entregas > 0:
-                        estado_parcial = EstadoLote.objects.get(codigo='RECEPCION_PARCIAL', activo=True)
-                        lote.estado = estado_parcial
-                        print(f"✅ Lote parcial: {estado_parcial.nombre}")
-
-                    lote.save()
-                    print(f"✅ Estado del lote actualizado: {lote.estado.nombre}")
-
-                except EstadoLote.DoesNotExist as e:
-                    print(f"⚠️ Estado de lote no encontrado: {e}")
-                except Exception as e:
-                    print(f"⚠️ Error actualizando estado del lote: {e}")
+                # Estado del lote y contador de entregas según lo realmente recibido
+                lote.actualizar_estado_recepcion()
 
                 # Actualizar estadísticas del resultado
                 resultado['importados'] = importados
@@ -1773,7 +1784,8 @@ class LoteDetalleViewSet(viewsets.ModelViewSet):
     """ViewSet para gestión de detalles de lotes"""
     queryset = LoteDetalle.objects.all().select_related('lote', 'modelo__marca')
     serializer_class = LoteDetalleSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [PermisoPorRol]
+    lectura_alternativa = [('lotes', 'leer')]
 
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['lote', 'modelo']
