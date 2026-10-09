@@ -384,14 +384,14 @@ class AuditLogViewSet(ModelViewSet):
         from django.db.models import Count
         from datetime import timedelta
 
-        total_logs = self.get_queryset().count()
+        # Respeta los filtros de la pantalla (módulo, acción, usuario, fechas)
+        qs = self.filter_queryset(self.get_queryset())
+        total_logs = qs.count()
 
-        por_accion = dict(self.get_queryset().values_list('accion').annotate(
-            count=Count('accion')
-        ))
+        por_accion = dict(qs.order_by().values_list('accion').annotate(count=Count('accion')))
 
         hace_24h = timezone.now() - timedelta(hours=24)
-        logs_24h = self.get_queryset().filter(fecha_hora__gte=hace_24h).count()
+        logs_24h = qs.filter(fecha_hora__gte=hace_24h).count()
 
         return Response({
             'total_logs': total_logs,

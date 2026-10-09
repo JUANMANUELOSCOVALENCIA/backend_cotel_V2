@@ -16,9 +16,10 @@ from ..serializers import (
     SectorSolicitanteSerializer, DevolucionSectorSerializer,
     ReingresoSectorSerializer, MaterialListSerializer
 )
+from usuarios.auditoria import AuditoriaMixin
 
 
-class SectorSolicitanteViewSet(viewsets.ModelViewSet):
+class SectorSolicitanteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """Gestión de sectores solicitantes"""
     queryset = SectorSolicitante.objects.all()
     serializer_class = SectorSolicitanteSerializer
@@ -59,8 +60,10 @@ class SectorSolicitanteViewSet(viewsets.ModelViewSet):
         })
 
 
-class DevolucionSectorView(APIView):
+class DevolucionSectorView(AuditoriaMixin, APIView):
     """Devolver materiales defectuosos al sector solicitante"""
+    auditoria_modelo = Material
+    auditoria_acciones = {'POST': 'Devolución de equipos defectuosos'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
     accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}
@@ -95,8 +98,10 @@ class DevolucionSectorView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class ReingresoSectorView(APIView):
+class ReingresoSectorView(AuditoriaMixin, APIView):
     """Reingresar nuevos equipos desde sector solicitante"""
+    auditoria_modelo = Material
+    auditoria_acciones = {'POST': 'Reposición de equipo (reingreso)'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
     accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}
@@ -123,9 +128,18 @@ class ReingresoSectorView(APIView):
 
         if serializer.is_valid():
             materiales = serializer.ejecutar(request.user)
+            reparados = sum(1 for e in serializer.validated_data['nuevos_equipos'] if e.get('mismo_equipo'))
+            nuevos = len(materiales) - reparados
+            partes = []
+            if nuevos:
+                partes.append(f'{nuevos} equipo(s) de reposición registrados')
+            if reparados:
+                partes.append(f'{reparados} equipo(s) reparados reactivados')
             return Response({
                 'success': True,
-                'message': f'{len(materiales)} nuevos materiales ingresados desde sector'
+                'message': ' y '.join(partes) + '. Quedan como Nuevos, pendientes de laboratorio.',
+                'nuevos': nuevos,
+                'reparados': reparados,
             })
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

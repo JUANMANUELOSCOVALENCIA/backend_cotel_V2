@@ -44,6 +44,7 @@ from .views.laboratorio_views import InspeccionLaboratorioView
 # IMPORTAR MaterialViewSet SOLO UNA VEZ
 from .views.material_views import MaterialViewSet, ReingresoMaterialView
 from .views.sector_views import SectorSolicitanteViewSet, DevolucionSectorView, ReingresoSectorView
+from .views.garantia_views import EnvioGarantiaViewSet
 
 # ========== CONFIGURACIÓN DEL ROUTER ==========
 router = DefaultRouter()
@@ -80,6 +81,7 @@ router.register(r'estados-material-general', EstadoMaterialGeneralViewSet, basen
 router.register(r'tipos-almacen', TipoAlmacenViewSet, basename='tipos-almacen')
 router.register(r'modelo-componentes', ModeloComponenteViewSet, basename='modelo-componentes')
 router.register(r'sectores-solicitantes', SectorSolicitanteViewSet, basename='sectores-solicitantes')
+router.register(r'garantias', EnvioGarantiaViewSet, basename='garantias')
 
 # ========== URLS PRINCIPALES ==========
 
@@ -116,4 +118,4 @@ urlpatterns = [
     path('sectores/reingreso/', ReingresoSectorView.as_view(), name='reingreso-sector'),
     # ===== ENDPOINTS DE VIEWSETS (AUTO-GENERADOS) AL FINAL =====
     path('', include(router.urls)),
-]
+]

@@ -23,6 +23,7 @@ from ..models import (
     EstadoMaterialONU, HistorialMaterial, InspeccionLaboratorio, Lote, Material, PRUEBAS_LABORATORIO,
 )
 from ..permisos import PermisoPorRol
+from usuarios.auditoria import AuditoriaMixin
 
 DIAS_LIMITE = 15  # a partir de aquí un equipo se considera demorado en laboratorio
 
@@ -102,7 +103,7 @@ def _enviar(materiales, usuario):
     with transaction.atomic():
         for m in materiales:
             codigo = m.estado_onu.codigo if m.estado_onu_id else ''
-            if codigo not in ESTADOS_ENVIABLES:
+            if codigo not in ESTADOS_ENVIABLES or m.traspaso_actual_id:  # en tránsito: no se mueve
                 omitidos.append(m.gpon_serial or m.codigo_interno)
                 continue
             m.enviar_a_laboratorio(usuario=usuario)
@@ -133,8 +134,10 @@ def _siguiente_informe(fecha_txt):
 
 # ---------- vistas ----------
 
-class LaboratorioView(APIView):
+class LaboratorioView(AuditoriaMixin, APIView):
     """GET: resumen del laboratorio. POST: enviar equipos a laboratorio."""
+    auditoria_modelo = Material
+    auditoria_acciones = {'POST': 'Envío a laboratorio'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'laboratorio'
     accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}
@@ -187,8 +190,10 @@ class LaboratorioView(APIView):
         return _respuesta_envio(*_enviar(materiales, request.user))
 
 
-class LaboratorioMasivoView(APIView):
+class LaboratorioMasivoView(AuditoriaMixin, APIView):
     """Envíos masivos: lote completo, una entrega del lote o todos los pendientes."""
+    auditoria_modelo = Material
+    auditoria_acciones = {'POST': 'Envío masivo a laboratorio'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'laboratorio'
     accion_permiso = 'actualizar'
@@ -222,7 +227,7 @@ class LaboratorioMasivoView(APIView):
         return Response({'error': 'Acción no válida.'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class LaboratorioConsultaView(APIView):
+class LaboratorioConsultaView(AuditoriaMixin, APIView):
     """Listas del laboratorio: ?tipo=pendientes_inspeccion | en_laboratorio | tiempo_excesivo"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'laboratorio'
@@ -249,8 +254,10 @@ class LaboratorioConsultaView(APIView):
         return Response({'total': len(datos), 'materiales': datos})
 
 
-class InspeccionLaboratorioView(APIView):
+class InspeccionLaboratorioView(AuditoriaMixin, APIView):
     """GET: historial de inspecciones (paginado). POST: registrar resultado."""
+    auditoria_modelo = InspeccionLaboratorio
+    auditoria_acciones = {'POST': 'Inspección de laboratorio'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'laboratorio'
     accion_permiso = {'GET': 'leer', 'POST': 'actualizar'}

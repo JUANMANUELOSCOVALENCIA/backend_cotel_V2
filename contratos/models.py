@@ -106,6 +106,10 @@ class Contrato(models.Model):
     ])
     direccion_instalacion = models.TextField()
     observaciones = models.TextField(blank=True)
+    # Estado de cuenta (resumen, sin facturas): lo que se usa para bloquear solicitudes por deuda
+    facturas_pendientes = models.PositiveIntegerField(default=0)
+    monto_deuda = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    deuda_actualizada = models.DateField(null=True, blank=True, help_text='Fecha del dato de deuda')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

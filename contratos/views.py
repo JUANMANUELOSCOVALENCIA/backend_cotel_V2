@@ -17,9 +17,14 @@ from .serializers import (
     TipoServicioSerializer, PlanComercialSerializer, ContratoSerializer,
     ContratoCreateSerializer, ServicioSerializer, OrdenTrabajoSerializer
 )
+from usuarios.auditoria import AuditoriaMixin
+from usuarios.permissions import PermisoPorRol
 
 
-class TipoServicioViewSet(viewsets.ModelViewSet):
+class TipoServicioViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = TipoServicio.objects.all()
     serializer_class = TipoServicioSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -54,7 +59,10 @@ class TipoServicioViewSet(viewsets.ModelViewSet):
         return Response(data)
 
 
-class TipoTramiteViewSet(viewsets.ModelViewSet):
+class TipoTramiteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = TipoTramite.objects.filter(activo=True)
     serializer_class = TipoTramiteSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -62,7 +70,10 @@ class TipoTramiteViewSet(viewsets.ModelViewSet):
     ordering = ['nombre']
 
 
-class FormaPagoViewSet(viewsets.ModelViewSet):
+class FormaPagoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = FormaPago.objects.filter(activo=True)
     serializer_class = FormaPagoSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -70,7 +81,10 @@ class FormaPagoViewSet(viewsets.ModelViewSet):
     ordering = ['nombre']
 
 
-class ClienteViewSet(viewsets.ModelViewSet):
+class ClienteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = Cliente.objects.all()
     serializer_class = ClienteSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -120,7 +134,10 @@ class ClienteViewSet(viewsets.ModelViewSet):
         })
 
 
-class PlanComercialViewSet(viewsets.ModelViewSet):
+class PlanComercialViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = PlanComercial.objects.select_related('tipo_servicio')
     serializer_class = PlanComercialSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -152,7 +169,10 @@ class PlanComercialViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class ContratoViewSet(viewsets.ModelViewSet):
+class ContratoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = Contrato.objects.select_related('cliente', 'tipo_tramite', 'forma_pago')
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['numero_contrato', 'cliente__nombres', 'cliente__apellidos', 'cliente__ci']
@@ -248,7 +268,10 @@ class ContratoViewSet(viewsets.ModelViewSet):
         })
 
 
-class ServicioViewSet(viewsets.ModelViewSet):
+class ServicioViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = Servicio.objects.select_related('contrato__cliente', 'plan_comercial__tipo_servicio')
     serializer_class = ServicioSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -318,7 +341,10 @@ class ServicioViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class OrdenTrabajoViewSet(viewsets.ModelViewSet):
+class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    # Sin pantallas propias todavía: solo superusuarios (antes quedaba abierto sin login)
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'contratos'
     queryset = OrdenTrabajo.objects.select_related('contrato__cliente')
     serializer_class = OrdenTrabajoSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]

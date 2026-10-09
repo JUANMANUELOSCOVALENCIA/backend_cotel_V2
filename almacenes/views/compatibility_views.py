@@ -19,10 +19,11 @@ from ..serializers import (
     MarcaSerializer, ModeloSerializer, ComponenteSerializer, ModeloComponenteSerializer, ModeloCreateUpdateSerializer,
     ComponenteCreateUpdateSerializer
 )
+from usuarios.auditoria import AuditoriaMixin
 
 # ========== VIEWSETS ACTUALIZADOS DE MODELOS BÁSICOS ==========
 
-class MarcaViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+class MarcaViewSet(AuditoriaMixin, BorradoSeguroMixin, viewsets.ModelViewSet):
     """ViewSet actualizado para marcas"""
     queryset = Marca.objects.all()
     serializer_class = MarcaSerializer
@@ -66,7 +67,7 @@ class MarcaViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
         serializer = ModeloSerializer(modelos, many=True)
         return Response(serializer.data)
 
-class ModeloViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+class ModeloViewSet(AuditoriaMixin, BorradoSeguroMixin, viewsets.ModelViewSet):
     borrado_permitido = ('almacenes.ModeloComponente',)  # el contenido de la caja se borra con el modelo
     """ViewSet actualizado para modelos con soporte de materiales múltiples"""
     queryset = Modelo.objects.all().select_related('marca', 'tipo_material', 'unidad_medida')
@@ -250,7 +251,7 @@ class ModeloViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
             'message': f'Componentes actualizados para modelo {modelo.nombre}',
             'total_componentes': len(componentes_data)
         })
-class ComponenteViewSet(viewsets.ModelViewSet):
+class ComponenteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet actualizado para componentes"""
     queryset = Componente.objects.all()
     serializer_class = ComponenteSerializer
@@ -368,7 +369,7 @@ class ComponenteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 # En compatibility_views.py
 
-class ModeloComponenteViewSet(viewsets.ModelViewSet):
+class ModeloComponenteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para gestión de relaciones modelo-componente"""
     queryset = ModeloComponente.objects.all().select_related('modelo__marca', 'componente')
     serializer_class = ModeloComponenteSerializer

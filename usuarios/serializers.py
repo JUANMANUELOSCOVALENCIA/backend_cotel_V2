@@ -43,7 +43,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'fecha_hora']
 
     def get_fecha_hora_formateada(self, obj):
-        return obj.fecha_hora.strftime('%d/%m/%Y %H:%M:%S')
+        # en hora local (La Paz), no en UTC
+        return timezone.localtime(obj.fecha_hora).strftime('%d/%m/%Y %H:%M:%S')
 
     def get_es_eliminacion(self, obj):
         """Identificar si es una acción de eliminación"""

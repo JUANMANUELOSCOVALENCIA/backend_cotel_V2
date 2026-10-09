@@ -12,9 +12,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 from ..models import Almacen, Proveedor
 from ..serializers import AlmacenSerializer, ProveedorSerializer
 from ..optimizaciones import optimizar_almacenes, optimizar_proveedores
+from usuarios.auditoria import AuditoriaMixin
 
 
-class AlmacenViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+class AlmacenViewSet(AuditoriaMixin, BorradoSeguroMixin, viewsets.ModelViewSet):
     """ViewSet para gestión de almacenes"""
     queryset = Almacen.objects.all()
     serializer_class = AlmacenSerializer
@@ -34,7 +35,7 @@ class AlmacenViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
 
-class ProveedorViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+class ProveedorViewSet(AuditoriaMixin, BorradoSeguroMixin, viewsets.ModelViewSet):
     """ViewSet para gestión de proveedores"""
     queryset = Proveedor.objects.all()
     serializer_class = ProveedorSerializer

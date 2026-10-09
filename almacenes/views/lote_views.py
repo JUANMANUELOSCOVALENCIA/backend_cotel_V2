@@ -31,9 +31,15 @@ from ..serializers import (
     EntregaParcialLoteSerializer,
     MaterialListSerializer, ImportacionMasivaSerializer
 )
+from usuarios.auditoria import AuditoriaMixin
 
 
-class LoteViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
+class LoteViewSet(AuditoriaMixin, BorradoSeguroMixin, viewsets.ModelViewSet):
+    auditoria_acciones = {
+        'agregar_entrega_parcial': 'Registrar entrega parcial', 'eliminar': 'Eliminar entrega',
+        'cerrar_lote': 'Cerrar lote', 'reabrir_lote': 'Reabrir lote',
+        'enviar_laboratorio_masivo': 'Enviar a laboratorio', 'completar_recepcion': 'Completar recepción',
+    }
     # Un lote con equipos/materiales no se borra (antes se borraban en cascada)
     borrado_permitido = ('almacenes.LoteDetalle', 'almacenes.EntregaParcialLote')
     sugerencia_borrado = 'Si ya no se usará, ciérralo.'
@@ -832,8 +838,14 @@ class LoteViewSet(BorradoSeguroMixin, viewsets.ModelViewSet):
 # almacenes/views/lote_views.py - ImportacionMasivaView COMPLETA
 # ======================================================
 
-class ImportacionMasivaView(APIView):
+class ImportacionMasivaView(AuditoriaMixin, APIView):
     """View para importación masiva de materiales desde Excel/CSV - SOPORTE DUAL"""
+    auditoria_modelo = Lote
+    auditoria_acciones = {'POST': 'Importación de equipos'}
+
+    def auditoria_omitir(self, request):
+        # el paso de validación no guarda nada: no se registra
+        return str(request.data.get('validacion', 'false')).lower() == 'true'
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
     accion_permiso = {'GET': 'leer', 'POST': 'crear'}  # importar = crear materiales
@@ -1780,7 +1792,7 @@ class ImportacionMasivaView(APIView):
         })
 
 
-class LoteDetalleViewSet(viewsets.ModelViewSet):
+class LoteDetalleViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para gestión de detalles de lotes"""
     queryset = LoteDetalle.objects.all().select_related('lote', 'modelo__marca')
     serializer_class = LoteDetalleSerializer

@@ -26,11 +26,12 @@ from ..serializers import (
     EstadoMaterialGeneralSerializer, TipoAlmacenSerializer,AlmacenSerializer, ProveedorSerializer,
     MarcaSerializer, ListaOpcionesSerializer, ModeloSerializer, ComponenteSerializer, SectorSolicitanteSerializer
 )
+from usuarios.auditoria import AuditoriaMixin
 
 
 # ========== VIEWSETS PARA MODELOS DE CHOICES ==========
 
-class TipoIngresoViewSet(viewsets.ModelViewSet):
+class TipoIngresoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para tipos de ingreso"""
     queryset = TipoIngreso.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoIngresoSerializer
@@ -63,7 +64,7 @@ class TipoIngresoViewSet(viewsets.ModelViewSet):
         })
 
 
-class EstadoLoteViewSet(viewsets.ModelViewSet):
+class EstadoLoteViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para estados de lote"""
     queryset = EstadoLote.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoLoteSerializer
@@ -91,7 +92,7 @@ class EstadoLoteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class EstadoTraspasoViewSet(viewsets.ModelViewSet):
+class EstadoTraspasoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para estados de traspaso"""
     queryset = EstadoTraspaso.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoTraspasoSerializer
@@ -112,7 +113,7 @@ class EstadoTraspasoViewSet(viewsets.ModelViewSet):
         return queryset
 
 
-class TipoMaterialViewSet(viewsets.ModelViewSet):
+class TipoMaterialViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para tipos de material"""
     queryset = TipoMaterial.objects.all().select_related('unidad_medida_default', 'created_by').order_by('orden',
                                                                                                          'nombre')
@@ -192,7 +193,7 @@ class TipoMaterialViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class UnidadMedidaViewSet(viewsets.ModelViewSet):
+class UnidadMedidaViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para unidades de medida"""
     queryset = UnidadMedida.objects.all().order_by('orden', 'nombre')
     serializer_class = UnidadMedidaSerializer
@@ -225,7 +226,7 @@ class UnidadMedidaViewSet(viewsets.ModelViewSet):
         })
 
 
-class EstadoMaterialONUViewSet(viewsets.ModelViewSet):
+class EstadoMaterialONUViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para estados de material ONU"""
     queryset = EstadoMaterialONU.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialONUSerializer
@@ -273,7 +274,7 @@ class EstadoMaterialONUViewSet(viewsets.ModelViewSet):
         })
 
 
-class EstadoMaterialGeneralViewSet(viewsets.ModelViewSet):
+class EstadoMaterialGeneralViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para estados de material general"""
     queryset = EstadoMaterialGeneral.objects.all().order_by('orden', 'nombre')
     serializer_class = EstadoMaterialGeneralSerializer
@@ -308,7 +309,7 @@ class EstadoMaterialGeneralViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class TipoAlmacenViewSet(viewsets.ModelViewSet):
+class TipoAlmacenViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para tipos de almacén"""
     queryset = TipoAlmacen.objects.all().order_by('orden', 'nombre')
     serializer_class = TipoAlmacenSerializer
@@ -343,7 +344,7 @@ class TipoAlmacenViewSet(viewsets.ModelViewSet):
 
 # ========== VIEW ESPECIAL PARA OPCIONES COMPLETAS ==========
 
-class OpcionesCompletasView(APIView):
+class OpcionesCompletasView(AuditoriaMixin, APIView):
     """
     View especial que devuelve TODAS las opciones necesarias para el frontend React.
     Esto evita múltiples llamadas HTTP y proporciona todos los datos para comboboxes.
@@ -466,11 +467,13 @@ class OpcionesCompletasView(APIView):
 
 # ========== VIEW PARA INICIALIZAR DATOS ==========
 
-class InicializarDatosView(APIView):
+class InicializarDatosView(AuditoriaMixin, APIView):
     """
     View para inicializar todos los datos base del sistema.
     Solo para administradores en primera instalación.
     """
+    auditoria_modelo = TipoIngreso
+    auditoria_acciones = {'POST': 'Inicializar datos base'}
     permission_classes = [PermisoPorRol]
     solo_superusuario = True
 

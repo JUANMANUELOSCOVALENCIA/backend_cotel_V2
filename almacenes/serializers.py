@@ -796,8 +796,14 @@ class MaterialListSerializer(serializers.ModelSerializer):
             'es_nuevo', 'numero_entrega_parcial',  # ← Este YA funciona
             'created_at', 'updated_at',
             'modelo_info', 'lote_info', 'almacen_info',  # ← Restablecer estos
-            'entrega_parcial_info', 'estado_display', 'tipo_material_info'
+            'entrega_parcial_info', 'estado_display', 'tipo_material_info', 'en_transito'
         ]
+
+    en_transito = serializers.SerializerMethodField()
+
+    def get_en_transito(self, obj):
+        t = obj.traspaso_actual if obj.traspaso_actual_id else None
+        return {'traspaso_id': t.id, 'numero': t.numero_traspaso, 'destino': t.almacen_destino.nombre} if t else None
 
     def get_modelo_info(self, obj):
         return {
@@ -1825,7 +1831,7 @@ class DevolucionSectorSerializer(serializers.Serializer):
         with transaction.atomic():
             for material in materiales:
                 material.estado_onu = estado_devuelto
-                material.observaciones += f"\n[DEVUELTO SECTOR] {timezone.localdate()} - {motivo}"
+                material.observaciones = (material.observaciones or '') + f"\n[DEVUELTO SECTOR] {timezone.localdate()} - {motivo}"
                 material.save()
 
                 # Historial
@@ -1857,38 +1863,82 @@ class ReingresoSectorSerializer(serializers.Serializer):
         help_text="Nuevos equipos: [{mac_address, gpon_serial, serial_manufacturer, codigo_item_equipo}]"
     )
 
+    @staticmethod
+    def normalizar_mac(valor):
+        """Acepta AA:BB:CC:DD:EE:FF, AA-BB-…, AABB.CCDD.EEFF o AABBCCDDEEFF (may. o min.)."""
+        hexa = re.sub(r'[^0-9A-Fa-f]', '', str(valor or '')).upper()
+        if len(hexa) != 12:
+            return None
+        return ':'.join(hexa[i:i + 2] for i in range(0, 12, 2))
+
     def validate_materiales_originales_ids(self, value):
-        estado_devuelto = EstadoMaterialONU.objects.get(codigo='DEVUELTO_SECTOR_SOLICITANTE', activo=True)
-        materiales = Material.objects.filter(id__in=value)
-
+        if not value:
+            raise serializers.ValidationError('Selecciona el equipo que se reemplaza.')
+        materiales = list(Material.objects.filter(id__in=value).select_related('estado_onu'))
+        if len(materiales) != len(set(value)):
+            raise serializers.ValidationError('Alguno de los equipos originales no existe.')
         for material in materiales:
-            if material.estado_onu != estado_devuelto:
+            if not material.estado_onu_id or material.estado_onu.codigo != 'DEVUELTO_SECTOR_SOLICITANTE':
                 raise serializers.ValidationError(
-                    f"Material {material.codigo_interno} debe estar DEVUELTO_SECTOR_SOLICITANTE"
+                    f"El equipo {material.gpon_serial or material.codigo_interno} no está como devuelto; no se puede reponer."
                 )
-
         return value
 
     def validate_nuevos_equipos(self, value):
-        for i, equipo in enumerate(value):
-            # Validar campos requeridos
+        macs, gpons = set(), set()
+        for i, equipo in enumerate(value, 1):
+            etiqueta = f'Equipo {i}' if len(value) > 1 else 'El equipo nuevo'
+            mac = self.normalizar_mac(equipo.get('mac_address'))
+            gpon = str(equipo.get('gpon_serial') or '').strip().upper()
+            dsn = str(equipo.get('serial_manufacturer') or '').strip()
+            item = str(equipo.get('codigo_item_equipo') or '').strip()
             if not equipo.get('mac_address'):
-                raise serializers.ValidationError(f"Equipo {i + 1}: MAC requerido")
-            if not equipo.get('gpon_serial'):
-                raise serializers.ValidationError(f"Equipo {i + 1}: GPON requerido")
-            if not equipo.get('codigo_item_equipo'):
-                raise serializers.ValidationError(f"Equipo {i + 1}: Item Equipo requerido")
-
-            # Validar formatos
-            mac = equipo['mac_address'].upper().replace('-', ':')
-            if not re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', mac):
-                raise serializers.ValidationError(f"Equipo {i + 1}: MAC inválido")
-
-            # Verificar unicidad
-            if Material.objects.filter(mac_address=mac).exists():
-                raise serializers.ValidationError(f"MAC {mac} ya existe")
-
+                raise serializers.ValidationError(f'{etiqueta}: la MAC es obligatoria.')
+            if not mac:
+                raise serializers.ValidationError(f'{etiqueta}: MAC no válida ({equipo.get("mac_address")}). Debe tener 12 caracteres hexadecimales, p. ej. AA:BB:CC:DD:EE:FF.')
+            if len(gpon) < 8:
+                raise serializers.ValidationError(f'{etiqueta}: el GPON serial debe tener al menos 8 caracteres.')
+            if dsn and len(dsn) < 6:
+                raise serializers.ValidationError(f'{etiqueta}: el D-SN debe tener al menos 6 caracteres.')
+            if not (item.isdigit() and 6 <= len(item) <= 10):
+                raise serializers.ValidationError(f'{etiqueta}: el código de ítem debe tener entre 6 y 10 dígitos.')
+            if mac in macs or gpon in gpons:
+                raise serializers.ValidationError(f'{etiqueta}: MAC o GPON repetido en la misma reposición.')
+            macs.add(mac); gpons.add(gpon)
+            equipo.update(mac_address=mac, gpon_serial=gpon, serial_manufacturer=dsn or None, codigo_item_equipo=item)
         return value
+
+    def validate(self, data):
+        ids, equipos = data['materiales_originales_ids'], data['nuevos_equipos']
+        if len(ids) != len(equipos):
+            raise serializers.ValidationError('Debe haber un equipo nuevo por cada equipo que se reemplaza.')
+        originales = Material.objects.select_related('estado_onu').in_bulk(ids)
+        varios = len(equipos) > 1
+        for n, (oid, equipo) in enumerate(zip(ids, equipos), 1):
+            etiqueta = f'Equipo {n}' if varios else 'El equipo nuevo'
+            original = originales[oid]
+            mac, gpon = equipo['mac_address'], equipo['gpon_serial']
+            mismo_mac = (original.mac_address or '').upper() == mac
+            mismo_gpon = (original.gpon_serial or '').upper() == gpon
+            # El mismo equipo vuelve reparado: se reactiva el original (no se crea otro)
+            if mismo_mac or mismo_gpon:
+                if not (mismo_mac and mismo_gpon):
+                    raise serializers.ValidationError(
+                        f'{etiqueta}: {"la MAC" if mismo_mac else "el GPON"} es del equipo devuelto pero '
+                        f'{"el GPON" if mismo_mac else "la MAC"} no coincide. Revisa los datos.'
+                    )
+                equipo['mismo_equipo'] = True
+                continue
+            # Un equipo distinto: su MAC y GPON no pueden existir en otro registro
+            for campo, valor, nombre in (('mac_address', mac, 'la MAC'), ('gpon_serial__iexact', gpon, 'el GPON')):
+                otro = Material.objects.select_related('estado_onu').filter(**{campo: valor}).first()
+                if otro:
+                    estado = otro.estado_onu.nombre if otro.estado_onu_id else 'sin estado'
+                    raise serializers.ValidationError(
+                        f'{etiqueta}: {nombre} {valor} ya pertenece al equipo {otro.gpon_serial or otro.codigo_interno} '
+                        f'(estado: {estado}). Si es el mismo equipo devuelto reparado, ingresa su MAC y GPON originales.'
+                    )
+        return data
 
     def ejecutar(self, user):
         """Crear nuevos materiales de reingreso y marcar originales como REEMPLAZADO"""
@@ -1898,9 +1948,9 @@ class ReingresoSectorSerializer(serializers.Serializer):
         tipo_reingreso = TipoIngreso.objects.get(codigo='REINGRESO', activo=True)
         tipo_onu = TipoMaterial.objects.get(codigo='ONU', activo=True)
 
-        materiales_originales = Material.objects.filter(
-            id__in=self.validated_data['materiales_originales_ids']
-        )
+        ids = self.validated_data['materiales_originales_ids']
+        por_id = Material.objects.select_related('lote', 'modelo', 'almacen_actual').in_bulk(ids)
+        materiales_originales = [por_id[i] for i in ids]  # mismo orden que nuevos_equipos
         nuevos_equipos = self.validated_data['nuevos_equipos']
 
         materiales_creados = []
@@ -1909,8 +1959,30 @@ class ReingresoSectorSerializer(serializers.Serializer):
             for i, material_original in enumerate(materiales_originales):
                 equipo = nuevos_equipos[i]
 
+                if equipo.get('mismo_equipo'):
+                    # Vuelve el MISMO equipo reparado: se reactiva y pasa otra vez por laboratorio
+                    material_original.estado_onu = estado_nuevo
+                    material_original.fecha_envio_laboratorio = None
+                    material_original.fecha_retorno_laboratorio = None
+                    if equipo.get('serial_manufacturer'):
+                        material_original.serial_manufacturer = equipo['serial_manufacturer']
+                    material_original.observaciones = (material_original.observaciones or '') + f"\n[REPARADO] {timezone.localdate()} - Vuelve reparado"
+                    material_original.save()
+                    HistorialMaterial.objects.create(
+                        material=material_original,
+                        estado_anterior='DEVUELTO_SECTOR',
+                        estado_nuevo='NUEVO',
+                        almacen_anterior=material_original.almacen_actual,
+                        almacen_nuevo=material_original.almacen_actual,
+                        motivo='Vuelve reparado (pendiente de laboratorio)',
+                        observaciones=f'Desde {nombre_sector(material_original.lote)}',
+                        usuario_responsable=user
+                    )
+                    materiales_creados.append(material_original)
+                    continue
+
                 # Crear nuevo material como NUEVO
-                nuevo_material = Material.objects.create(
+                nuevo_material = Material(
                     tipo_material=tipo_onu,
                     modelo=material_original.modelo,
                     lote=material_original.lote,
@@ -1927,16 +1999,18 @@ class ReingresoSectorSerializer(serializers.Serializer):
                     numero_entrega_parcial=material_original.numero_entrega_parcial,
                     observaciones=f"Equipo de reposición desde {nombre_sector(material_original.lote)}"
                 )
+                nuevo_material._sin_historial_ingreso = True  # su historial lo escribe esta operación
+                nuevo_material.save()
 
                 # Marcar original como REEMPLAZADO
                 material_original.estado_onu = estado_reemplazado
-                material_original.observaciones += f"\n[REEMPLAZADO] {timezone.localdate()} - Sustituido por: {nuevo_material.codigo_interno}"
+                material_original.observaciones = (material_original.observaciones or '') + f"\n[REEMPLAZADO] {timezone.localdate()} - Sustituido por: {nuevo_material.codigo_interno}"
                 material_original.save()
 
                 # Historial para el nuevo
                 HistorialMaterial.objects.create(
                     material=nuevo_material,
-                    estado_anterior='N/A',
+                    estado_anterior='',
                     estado_nuevo='NUEVO',
                     almacen_anterior=None,
                     almacen_nuevo=nuevo_material.almacen_actual,

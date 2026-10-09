@@ -951,7 +951,7 @@ class Material(models.Model):
 
         # Primer movimiento del historial: el ingreso al almacén
         responsable = getattr(self, '_usuario', None) or (self.lote.created_by if self.lote_id else None)
-        if es_nuevo_registro and responsable:  # el historial exige usuario responsable
+        if es_nuevo_registro and responsable and not getattr(self, '_sin_historial_ingreso', False):  # el historial exige usuario responsable
             estado = self.estado_onu if self.tipo_material.es_unico else self.estado_general
             HistorialMaterial.objects.create(
                 material=self,
@@ -1067,7 +1067,7 @@ class TraspasoAlmacen(models.Model):
 
     numero_traspaso = models.CharField(max_length=20, unique=True,
                                        help_text="Número único de traspaso generado automáticamente")
-    numero_solicitud = models.CharField(max_length=10, help_text="Número de solicitud (6-10 dígitos)")
+    numero_solicitud = models.CharField(max_length=10, blank=True, help_text="Número de solicitud (opcional, 6-10 dígitos)")
 
     # Almacenes origen y destino
     almacen_origen = models.ForeignKey(
@@ -1142,12 +1142,11 @@ class TraspasoAlmacen(models.Model):
         super().save(*args, **kwargs)
 
     def _generar_numero_traspaso(self):
-        """Generar número de traspaso único"""
-        import uuid
-        while True:
-            numero = f"TR-{timezone.now().year}-{str(uuid.uuid4().int)[:6]}"
-            if not TraspasoAlmacen.objects.filter(numero_traspaso=numero).exists():
-                return numero
+        """Número correlativo por año: TR-2026-0001, TR-2026-0002…"""
+        prefijo = f"TR-{timezone.localdate().year}-"
+        usados = TraspasoAlmacen.objects.filter(numero_traspaso__startswith=prefijo).values_list('numero_traspaso', flat=True)
+        mayor = max([int(n[len(prefijo):]) for n in usados if n[len(prefijo):].isdigit()] or [0])
+        return f"{prefijo}{mayor + 1:04d}"
 
     @property
     def duracion_transito(self):
@@ -1164,10 +1163,15 @@ class TraspasoAlmacen(models.Model):
 
 
 class TraspasoMaterial(models.Model):
-    """Tabla intermedia para materials en traspasos"""
+    """Un equipo (o una cantidad de material a granel) dentro de un traspaso."""
     traspaso = models.ForeignKey(TraspasoAlmacen, on_delete=models.CASCADE, related_name='materiales')
     material = models.ForeignKey(Material, on_delete=models.CASCADE)
+    # Material a granel: cantidad que viaja (se descuenta del registro de origen al enviar)
+    cantidad = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # Registro donde quedó la cantidad en el almacén destino (granel)
+    material_destino = models.ForeignKey(Material, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     recibido = models.BooleanField(default=False)
+    faltante = models.BooleanField(default=False, help_text='No llegó al destino')
     observaciones = models.TextField(blank=True)
 
     class Meta:
@@ -1287,3 +1291,82 @@ class InspeccionLaboratorio(models.Model):
         """[(nombre, ok)] solo de las pruebas que se hicieron."""
         hechas = self.pruebas_aplicadas or CAMPOS_PRUEBA
         return [(n, getattr(self, c)) for c, n, _ in PRUEBAS_LABORATORIO if c in hechas]
+
+
+# ========== GARANTÍAS CON PROVEEDOR ==========
+# Una ONU que laboratorio rechaza (DEFECTUOSO) se envía al proveedor por garantía.
+# El proveedor responde por cada equipo: lo cambia por otro, lo devuelve reparado
+# o no lo repone (baja). Mientras tanto el equipo queda "En garantía".
+
+class EnvioGarantia(models.Model):
+    """Un envío de equipos defectuosos a un proveedor."""
+    numero = models.CharField(max_length=20, unique=True)
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.PROTECT, related_name='envios_garantia')
+    fecha_envio = models.DateField()
+    referencia = models.CharField(max_length=100, blank=True,
+                                  help_text='Nota, carta o número de trámite con el proveedor')
+    area_tramite = models.ForeignKey(SectorSolicitante, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='envios_garantia',
+                                     help_text='Área de COTEL que lleva el trámite (opcional)')
+    observaciones = models.TextField(blank=True)
+    cerrado = models.BooleanField(default=False, help_text='Todos los equipos tienen respuesta del proveedor')
+    fecha_cierre = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey('usuarios.Usuario', on_delete=models.PROTECT, related_name='envios_garantia')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'almacenes_envio_garantia'
+        verbose_name = 'Envío a garantía'
+        verbose_name_plural = 'Envíos a garantía'
+        ordering = ['-fecha_envio', '-id']
+
+    def __str__(self):
+        return f'{self.numero} - {self.proveedor.nombre_comercial}'
+
+    @staticmethod
+    def siguiente_numero():
+        anio = timezone.localdate().year
+        prefijo = f'GAR-{anio}-'
+        ultimo = EnvioGarantia.objects.filter(numero__startswith=prefijo).order_by('-numero').values_list('numero', flat=True).first()
+        n = int(ultimo.rsplit('-', 1)[1]) + 1 if ultimo else 1
+        return f'{prefijo}{n:04d}'
+
+    def actualizar_cierre(self):
+        pendientes = self.detalles.filter(resultado=EnvioGarantiaDetalle.PENDIENTE).exists()
+        cerrado = not pendientes
+        if cerrado != self.cerrado:
+            self.cerrado = cerrado
+            self.fecha_cierre = timezone.now() if cerrado else None
+            self.save(update_fields=['cerrado', 'fecha_cierre', 'updated_at'])
+
+
+class EnvioGarantiaDetalle(models.Model):
+    """Un equipo dentro de un envío a garantía y la respuesta del proveedor."""
+    PENDIENTE, REEMPLAZADO, REPARADO, SIN_REPOSICION = 'PENDIENTE', 'REEMPLAZADO', 'REPARADO', 'SIN_REPOSICION'
+    RESULTADOS = [
+        (PENDIENTE, 'Pendiente'),
+        (REEMPLAZADO, 'Cambiado por otro equipo'),
+        (REPARADO, 'Devuelto reparado'),
+        (SIN_REPOSICION, 'Sin reposición (baja)'),
+    ]
+
+    envio = models.ForeignKey(EnvioGarantia, on_delete=models.CASCADE, related_name='detalles')
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name='garantias')
+    falla = models.CharField(max_length=200, blank=True, help_text='Falla reportada (de laboratorio)')
+    resultado = models.CharField(max_length=20, choices=RESULTADOS, default=PENDIENTE)
+    material_reposicion = models.ForeignKey(Material, on_delete=models.PROTECT, null=True, blank=True,
+                                            related_name='reposicion_de')
+    fecha_respuesta = models.DateTimeField(null=True, blank=True)
+    observaciones = models.TextField(blank=True)
+    respondido_por = models.ForeignKey('usuarios.Usuario', on_delete=models.PROTECT, null=True, blank=True,
+                                       related_name='+')
+
+    class Meta:
+        db_table = 'almacenes_envio_garantia_detalle'
+        verbose_name = 'Equipo en garantía'
+        verbose_name_plural = 'Equipos en garantía'
+        unique_together = [('envio', 'material')]
+
+    def __str__(self):
+        return f'{self.envio.numero} · {self.material.gpon_serial or self.material.codigo_interno}'

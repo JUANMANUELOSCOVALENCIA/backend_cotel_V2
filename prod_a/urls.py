@@ -113,6 +113,7 @@ urlpatterns = [
 
     # Módulo de Contratos (existente)
     path('api/contratos/', include('contratos.urls')),
+    path('api/operaciones/', include('operaciones.urls')),
 ]
 
 # ===== CONFIGURACIÓN PARA DESARROLLO =====

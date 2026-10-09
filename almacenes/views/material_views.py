@@ -17,6 +17,7 @@ from ..models import Material, TipoMaterial, EstadoMaterialONU, Lote, Almacen, M
     HistorialMaterial, TipoIngreso
 from ..pagination import CustomPageNumberPagination
 from ..serializers import MaterialListSerializer, MaterialDetailSerializer
+from usuarios.auditoria import AuditoriaMixin
 
 
 class MaterialFilter(django_filters.FilterSet):
@@ -89,12 +90,15 @@ class MaterialFilter(django_filters.FilterSet):
         }
 
 
-class MaterialViewSet(viewsets.ModelViewSet):
+class MaterialViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     """ViewSet para gestión de materiales (ONUs y otros)"""
+    auditoria_excluir = {'busqueda_avanzada'}
+    auditoria_acciones = {'cambiar_estado': 'Corrección de estado', 'devolver_a_sector': 'Devolución a sector'}
     queryset = Material.objects.select_related(
         'modelo__marca', 'modelo__tipo_material', 'modelo__unidad_medida', 'almacen_actual',
         'lote__proveedor', 'lote__almacen_destino',  # antes: 2 consultas extra por fila
-        'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen'
+        'estado_onu', 'estado_general', 'tipo_material', 'tipo_origen',
+        'traspaso_actual__almacen_destino',
     ).order_by('-created_at')
 
     pagination_class = CustomPageNumberPagination
@@ -241,6 +245,8 @@ class MaterialViewSet(viewsets.ModelViewSet):
         nuevo_estado_id = request.data.get('estado_id')
         motivo = (request.data.get('motivo') or '').strip()
 
+        if material.traspaso_actual_id:
+            return Response({'error': 'El equipo está en tránsito por un traspaso: recíbelo o cancela el traspaso primero.'}, status=status.HTTP_400_BAD_REQUEST)
         if not nuevo_estado_id:
             return Response({'error': 'Elige el nuevo estado'}, status=status.HTTP_400_BAD_REQUEST)
         if len(motivo) < 5:
@@ -451,8 +457,10 @@ class MaterialViewSet(viewsets.ModelViewSet):
 
 # En almacenes/views/material_views.py
 
-class ReingresoMaterialView(APIView):
+class ReingresoMaterialView(AuditoriaMixin, APIView):
     """View para manejar reingresos de materiales de reposición"""
+    auditoria_modelo = Material
+    auditoria_acciones = {'POST': 'Reingreso de equipo'}
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
     accion_permiso = 'actualizar'

@@ -49,6 +49,8 @@ NOMBRES = {
     'unidades-medida': 'unidades de medida', 'tipos-almacen': 'tipos de almacén', 'tipos-ingreso': 'tipos de ingreso',
     'estados-lote': 'estados de lote', 'estados-traspaso': 'estados de traspaso',
     'estados-material-onu': 'estados de ONU', 'estados-material-general': 'estados de material',
+    'solicitudes': 'solicitudes', 'ordenes': 'órdenes de trabajo', 'cobertura': 'zonas de cobertura',
+    'planes': 'planes', 'contratos': 'contratos', 'clientes': 'clientes',
 }
 
 MSG_CAMBIO_PASSWORD = 'Debes cambiar tu contraseña antes de continuar.'

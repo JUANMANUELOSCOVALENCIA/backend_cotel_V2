@@ -16,11 +16,12 @@ from ..models import (
     TipoMaterial, EstadoMaterialONU, EstadoMaterialGeneral,
     EstadoLote, EstadoTraspaso,
 )
+from usuarios.auditoria import AuditoriaMixin
 # EstadisticasGeneralesSerializer se usa solo para documentación
 # Las estadísticas se construyen directamente en las views
 
 
-class EstadisticasGeneralesView(APIView):
+class EstadisticasGeneralesView(AuditoriaMixin, APIView):
     """Vista para estadísticas generales del sistema completo"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'almacenes'
@@ -156,7 +157,7 @@ class EstadisticasGeneralesView(APIView):
         return Response(data)
 
 
-class DashboardView(APIView):
+class DashboardView(AuditoriaMixin, APIView):
     """Dashboard operativo con métricas en tiempo real"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'almacenes'
@@ -282,7 +283,7 @@ class DashboardView(APIView):
         })
 
 
-class ReporteInventarioView(APIView):
+class ReporteInventarioView(AuditoriaMixin, APIView):
     """Reporte detallado de inventario"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
@@ -395,7 +396,7 @@ class ReporteInventarioView(APIView):
         return response
 
 
-class ReporteMovimientosView(APIView):
+class ReporteMovimientosView(AuditoriaMixin, APIView):
     """Reporte de movimientos y trazabilidad"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'materiales'
@@ -464,7 +465,7 @@ class ReporteMovimientosView(APIView):
         })
 
 
-class ReporteGarantiasView(APIView):
+class ReporteGarantiasView(AuditoriaMixin, APIView):
     """Reporte de garantías y vencimientos"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'lotes'
@@ -539,7 +540,7 @@ class ReporteGarantiasView(APIView):
         })
 
 
-class ReporteEficienciaView(APIView):
+class ReporteEficienciaView(AuditoriaMixin, APIView):
     """Reporte de eficiencia y KPIs operativos"""
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'laboratorio'
