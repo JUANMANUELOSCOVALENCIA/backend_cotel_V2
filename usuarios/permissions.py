@@ -51,6 +51,7 @@ NOMBRES = {
     'estados-material-onu': 'estados de ONU', 'estados-material-general': 'estados de material',
     'solicitudes': 'solicitudes', 'ordenes': 'órdenes de trabajo', 'cobertura': 'zonas de cobertura',
     'planes': 'planes', 'contratos': 'contratos', 'clientes': 'clientes',
+    'cuadrillas': 'cuadrillas y vehículos', 'campo': 'el trabajo en campo', 'despachos': 'despachos a cuadrillas',
 }
 
 MSG_CAMBIO_PASSWORD = 'Debes cambiar tu contraseña antes de continuar.'

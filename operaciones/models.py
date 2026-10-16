@@ -6,10 +6,12 @@
 #   Solicitud ──(con cobertura)──▶ OT PENDIENTE ──▶ PROGRAMADA ──▶ EN CAMPO ──▶ EJECUTADA ──▶ VERIFICADA ──▶ CERRADA
 #             └─(sin cobertura)──▶ queda en SIN COBERTURA (demanda no atendida)
 #
+# Las OT se programan a una cuadrilla (vehículo + 2 o 3 técnicos) para una fecha.
 # El cliente y los planes se reutilizan de la app `contratos`.
 # ======================================================
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 from . import geo
@@ -208,6 +210,113 @@ class Solicitud(models.Model):
         return self.tipo in self.TIPOS_CON_COBERTURA
 
 
+class Vehiculo(models.Model):
+    """Vehículo de una cuadrilla. Su equipamiento fijo es una lista de control (no inventario)."""
+    placa = models.CharField(max_length=15, unique=True)
+    descripcion = models.CharField(max_length=120, help_text='Ej: Camioneta Toyota blanca')
+    activo = models.BooleanField(default=True)
+    observaciones = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'operaciones_vehiculo'
+        ordering = ['placa']
+        verbose_name = 'Vehículo'
+        verbose_name_plural = 'Vehículos'
+
+    def __str__(self):
+        return f'{self.placa} · {self.descripcion}'
+
+    def save(self, *args, **kwargs):
+        self.placa = ''.join((self.placa or '').split()).upper()
+        super().save(*args, **kwargs)
+
+
+class VehiculoEquipo(models.Model):
+    """Herramienta o equipo que va siempre en el vehículo (escalera, empalmadora, medidor de potencia…)."""
+    vehiculo = models.ForeignKey(Vehiculo, on_delete=models.CASCADE, related_name='equipamiento')
+    nombre = models.CharField(max_length=100)
+    cantidad = models.PositiveSmallIntegerField(default=1)
+    nota = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        db_table = 'operaciones_vehiculo_equipo'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.nombre} ×{self.cantidad}'
+
+
+class Cuadrilla(models.Model):
+    """Equipo de campo: un vehículo y de 2 a 3 técnicos (uno es el jefe), atendido por un almacén."""
+    MIN_INTEGRANTES = 2
+    MAX_INTEGRANTES = 3
+
+    # Código automático CUA-01, CUA-02… (no se escribe a mano)
+    nombre = models.CharField(max_length=60, unique=True, blank=True)
+    almacen = models.ForeignKey('almacenes.Almacen', on_delete=models.PROTECT, related_name='cuadrillas',
+                                help_text='Almacén del que sale su material')
+    vehiculo = models.ForeignKey(Vehiculo, on_delete=models.PROTECT, null=True, blank=True, related_name='cuadrillas')
+    zonas = models.ManyToManyField(ZonaCobertura, blank=True, related_name='cuadrillas',
+                                   help_text='Zonas de cobertura que atiende de preferencia')
+    capacidad_diaria = models.PositiveSmallIntegerField(null=True, blank=True,
+                                                        help_text='OT por día (solo avisa al pasarla)')
+    activo = models.BooleanField(default=True)
+    observaciones = models.TextField(blank=True)
+    creado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'operaciones_cuadrilla'
+        ordering = ['nombre']
+        constraints = [
+            # Un vehículo solo sale con una cuadrilla activa
+            models.UniqueConstraint(fields=['vehiculo'], condition=Q(activo=True), name='uq_cuadrilla_vehiculo_activa'),
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+    def save(self, *args, **kwargs):
+        if not self.nombre:
+            usados = Cuadrilla.objects.filter(nombre__startswith='CUA-').values_list('nombre', flat=True)
+            mayor = max([int(n[4:]) for n in usados if n[4:].isdigit()] or [0])
+            self.nombre = f'CUA-{mayor + 1:02d}'
+        super().save(*args, **kwargs)
+
+    def vigentes(self):
+        """Integrantes actuales (sin fecha de salida)."""
+        return self.integrantes.filter(hasta__isnull=True)
+
+    def integrantes_en(self, fecha):
+        """Quiénes formaban la cuadrilla en esa fecha (para la hoja del día y la responsabilidad)."""
+        return self.integrantes.filter(desde__lte=fecha).filter(Q(hasta__isnull=True) | Q(hasta__gte=fecha))
+
+
+class IntegranteCuadrilla(models.Model):
+    """Técnico en una cuadrilla desde/hasta una fecha. `hasta` vacío = integrante vigente."""
+    cuadrilla = models.ForeignKey(Cuadrilla, on_delete=models.CASCADE, related_name='integrantes')
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='cuadrillas_integradas')
+    es_jefe = models.BooleanField(default=False)
+    desde = models.DateField(default=timezone.localdate)
+    hasta = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'operaciones_integrante_cuadrilla'
+        ordering = ['-es_jefe', 'desde', 'id']
+        constraints = [
+            # Un técnico solo está en una cuadrilla a la vez
+            models.UniqueConstraint(fields=['usuario'], condition=Q(hasta__isnull=True), name='uq_integrante_una_cuadrilla'),
+            # Un solo jefe vigente por cuadrilla
+            models.UniqueConstraint(fields=['cuadrilla'], condition=Q(es_jefe=True, hasta__isnull=True), name='uq_cuadrilla_un_jefe'),
+        ]
+
+    def __str__(self):
+        return f'{self.usuario} en {self.cuadrilla}'
+
+
 class OrdenTrabajo(models.Model):
     class Estado(models.TextChoices):
         PENDIENTE = 'PENDIENTE', 'Pendiente'
@@ -228,6 +337,8 @@ class OrdenTrabajo(models.Model):
     estado = models.CharField(max_length=15, choices=Estado.choices, default=Estado.PENDIENTE)
     prioridad = models.CharField(max_length=10, choices=Solicitud.Prioridad.choices, default=Solicitud.Prioridad.NORMAL)
     fecha_programada = models.DateField(null=True, blank=True)
+    cuadrilla = models.ForeignKey(Cuadrilla, on_delete=models.PROTECT, null=True, blank=True, related_name='ordenes')
+    orden_visita = models.PositiveSmallIntegerField(null=True, blank=True, help_text='Orden en la hoja del día')
     fecha_cierre = models.DateTimeField(null=True, blank=True)
     observaciones = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -236,7 +347,8 @@ class OrdenTrabajo(models.Model):
     class Meta:
         db_table = 'operaciones_orden_trabajo'
         ordering = ['-created_at']
-        indexes = [models.Index(fields=['estado', '-created_at'])]
+        indexes = [models.Index(fields=['estado', '-created_at']),
+                   models.Index(fields=['cuadrilla', 'fecha_programada'])]
         verbose_name = 'Orden de trabajo'
         verbose_name_plural = 'Órdenes de trabajo'
 
@@ -248,13 +360,15 @@ class OrdenTrabajo(models.Model):
             self.numero = siguiente_numero(OrdenTrabajo, 'numero', 'OT')
         super().save(*args, **kwargs)
 
-    def cambiar_estado(self, nuevo, usuario=None, observacion=''):
+    def cambiar_estado(self, nuevo, usuario=None, observacion='', **historial):
+        """`historial`: cuadrilla_anterior/nueva y fecha_anterior/nueva cuando cambia la programación."""
         anterior = self.estado
         self.estado = nuevo
         if nuevo in (self.Estado.CERRADA, self.Estado.ANULADA):
             self.fecha_cierre = timezone.now()
         self.save()
-        HistorialOT.objects.create(orden=self, estado_anterior=anterior, estado_nuevo=nuevo, usuario=usuario, observacion=observacion)
+        HistorialOT.objects.create(orden=self, estado_anterior=anterior, estado_nuevo=nuevo, usuario=usuario,
+                                   observacion=observacion, **historial)
 
 
 class HistorialOT(models.Model):
@@ -263,9 +377,146 @@ class HistorialOT(models.Model):
     estado_nuevo = models.CharField(max_length=15)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
     observacion = models.TextField(blank=True)
+    # Cambios de programación (asignar, reprogramar, desasignar)
+    cuadrilla_anterior = models.ForeignKey(Cuadrilla, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    cuadrilla_nueva = models.ForeignKey(Cuadrilla, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    fecha_anterior = models.DateField(null=True, blank=True)
+    fecha_nueva = models.DateField(null=True, blank=True)
     fecha = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'operaciones_historial_ot'
         ordering = ['fecha', 'id']
 
+
+
+# ---------------- Despacho y rendición diaria ----------------
+
+class Despacho(models.Model):
+    """
+    Lo que el almacén entrega a una cuadrilla para su día de trabajo: las ONU (cada una por
+    su serie, quedan a cargo de la cuadrilla) y el material por cantidad. La ONU NO se ata a
+    una OT al salir: se asocia cuando se instala. Al volver, la rendición indica en qué OT se
+    instaló cada ONU, qué material usó cada OT, qué se devuelve, qué falta (a cargo de la
+    cuadrilla) y qué equipos se recuperaron de los clientes (retiros / cambios).
+    """
+    class Estado(models.TextChoices):
+        ENTREGADO = 'ENTREGADO', 'Entregado'
+        RENDIDO = 'RENDIDO', 'Rendido'
+        ANULADO = 'ANULADO', 'Anulado'
+
+    numero = models.CharField(max_length=20, unique=True, blank=True)
+    cuadrilla = models.ForeignKey(Cuadrilla, on_delete=models.PROTECT, related_name='despachos')
+    fecha = models.DateField()
+    almacen = models.ForeignKey('almacenes.Almacen', on_delete=models.PROTECT, related_name='despachos')
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.ENTREGADO)
+    observaciones = models.TextField(blank=True)
+    entregado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    rendido_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    rendido_at = models.DateTimeField(null=True, blank=True)
+    observaciones_rendicion = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'operaciones_despacho'
+        ordering = ['-fecha', 'cuadrilla__nombre']
+        constraints = [
+            # Un despacho vigente por cuadrilla y día
+            models.UniqueConstraint(fields=['cuadrilla', 'fecha'], condition=~Q(estado='ANULADO'), name='uq_despacho_cuadrilla_dia'),
+        ]
+
+    def __str__(self):
+        return self.numero or 'Despacho'
+
+    def save(self, *args, **kwargs):
+        if not self.numero:
+            self.numero = siguiente_numero(Despacho, 'numero', 'DES')
+        super().save(*args, **kwargs)
+
+
+class DespachoEquipo(models.Model):
+    """Una ONU entregada a la cuadrilla. `orden` = OT donde se instaló (se registra al instalarla)."""
+    class Resultado(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        INSTALADO = 'INSTALADO', 'Instalado'
+        DEVUELTO = 'DEVUELTO', 'Devuelto'
+        FALTANTE = 'FALTANTE', 'Faltante'
+
+    despacho = models.ForeignKey(Despacho, on_delete=models.CASCADE, related_name='equipos')
+    material = models.ForeignKey('almacenes.Material', on_delete=models.PROTECT, related_name='despachos_equipo')
+    orden = models.ForeignKey(OrdenTrabajo, on_delete=models.PROTECT, null=True, blank=True, related_name='equipos_despachados')
+    resultado = models.CharField(max_length=10, choices=Resultado.choices, default=Resultado.PENDIENTE)
+
+    class Meta:
+        db_table = 'operaciones_despacho_equipo'
+        ordering = ['id']
+        constraints = [models.UniqueConstraint(fields=['despacho', 'material'], name='uq_despacho_equipo')]
+
+
+class DespachoMaterial(models.Model):
+    """Material por cantidad (drop, rosetas, conectores…) entregado a la cuadrilla."""
+    despacho = models.ForeignKey(Despacho, on_delete=models.CASCADE, related_name='materiales')
+    material = models.ForeignKey('almacenes.Material', on_delete=models.PROTECT, related_name='despachos_material',
+                                 help_text='Registro del almacén del que salió')
+    cantidad = models.DecimalField(max_digits=10, decimal_places=2)
+    usada = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    devuelta = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    class Meta:
+        db_table = 'operaciones_despacho_material'
+        ordering = ['id']
+        constraints = [models.UniqueConstraint(fields=['despacho', 'material'], name='uq_despacho_material')]
+
+    @property
+    def faltante(self):
+        if self.usada is None or self.devuelta is None:
+            return None
+        return self.cantidad - self.usada - self.devuelta
+
+
+class ConsumoOT(models.Model):
+    """Material por cantidad usado en una OT (base del consumo real para el EOQ)."""
+    despacho_material = models.ForeignKey(DespachoMaterial, on_delete=models.CASCADE, related_name='consumos')
+    orden = models.ForeignKey(OrdenTrabajo, on_delete=models.PROTECT, related_name='consumos')
+    cantidad = models.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        db_table = 'operaciones_consumo_ot'
+        ordering = ['id']
+        constraints = [models.UniqueConstraint(fields=['despacho_material', 'orden'], name='uq_consumo_material_ot')]
+
+
+class EquipoRecuperado(models.Model):
+    """Equipo que la cuadrilla trae de un cliente (retiro o cambio de equipo). Vuelve al almacén para laboratorio."""
+    despacho = models.ForeignKey(Despacho, on_delete=models.CASCADE, related_name='recuperados')
+    orden = models.ForeignKey(OrdenTrabajo, on_delete=models.PROTECT, related_name='equipos_recuperados')
+    serial = models.CharField(max_length=100, help_text='GPON SN o MAC tal como se leyó')
+    material = models.ForeignKey('almacenes.Material', on_delete=models.SET_NULL, null=True, blank=True, related_name='recuperaciones',
+                                 help_text='Equipo del inventario (vacío si no estaba registrado: se ingresa por reingreso)')
+    observacion = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        db_table = 'operaciones_equipo_recuperado'
+        ordering = ['id']
+
+
+class KitMaterial(models.Model):
+    """
+    Material estándar por tipo de trabajo, para sugerir el despacho del día.
+    condicion: SIEMPRE, o solo si la OT incluye TV cable / telefonía.
+    """
+    class Condicion(models.TextChoices):
+        SIEMPRE = 'SIEMPRE', 'Siempre'
+        TV = 'TV', 'Si incluye TV cable'
+        TELEFONIA = 'TELEFONIA', 'Si incluye telefonía'
+
+    tipo = models.CharField(max_length=15, choices=Solicitud.Tipo.choices)
+    condicion = models.CharField(max_length=10, choices=Condicion.choices, default=Condicion.SIEMPRE)
+    modelo = models.ForeignKey('almacenes.Modelo', on_delete=models.PROTECT, related_name='kits')
+    cantidad = models.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        db_table = 'operaciones_kit_material'
+        ordering = ['tipo', 'condicion', 'id']
+        constraints = [models.UniqueConstraint(fields=['tipo', 'condicion', 'modelo'], name='uq_kit_material')]

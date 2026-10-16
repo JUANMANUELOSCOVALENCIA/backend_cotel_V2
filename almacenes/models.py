@@ -461,6 +461,16 @@ class Modelo(models.Model):
         elegidas = [c for c in CAMPOS_PRUEBA if c in (self.pruebas_laboratorio or [])]
         return elegidas or list(CAMPOS_PRUEBA)
 
+    # Servicios que puede dar una ONU de este modelo, según los puertos que se prueban en
+    # laboratorio (pruebas_laboratorio): CATV = TV cable, POTS = telefonía. Internet siempre.
+    @property
+    def soporta_tv(self):
+        return 'puerto_catv_ok' in self.pruebas_aplicables
+
+    @property
+    def soporta_telefonia(self):
+        return 'puerto_telefonia_rf_ok' in self.pruebas_aplicables
+
     class Meta:
         unique_together = ['marca', 'nombre']
         db_table = 'almacenes_modelo'

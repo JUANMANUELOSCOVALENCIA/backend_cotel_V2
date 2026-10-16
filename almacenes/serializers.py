@@ -259,6 +259,10 @@ class ModeloSerializer(serializers.ModelSerializer):
     # Componentes
     componentes = ModeloComponenteSerializer(source='modelocomponente_set', many=True, read_only=True)
 
+    # Servicios de la ONU (según sus puertos: CATV y telefonía)
+    soporta_tv = serializers.BooleanField(read_only=True)
+    soporta_telefonia = serializers.BooleanField(read_only=True)
+
     # Estadísticas
     materiales_count = serializers.SerializerMethodField()
     materiales_disponibles = serializers.SerializerMethodField()
@@ -276,7 +280,7 @@ class ModeloSerializer(serializers.ModelSerializer):
             'id', 'marca', 'marca_info',
             'nombre', 'codigo_modelo', 'descripcion', 'activo',
             'tipo_material', 'tipo_material_info', 'unidad_medida', 'unidad_medida_info',
-            'cantidad_por_unidad', 'requiere_inspeccion_inicial', 'pruebas_laboratorio',
+            'cantidad_por_unidad', 'requiere_inspeccion_inicial', 'pruebas_laboratorio', 'soporta_tv', 'soporta_telefonia',
             'componentes', 'materiales_count', 'materiales_disponibles',
             'created_at', 'updated_at', 'componentes_data'
         ]

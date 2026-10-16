@@ -2,24 +2,34 @@
 # operaciones/views.py
 # Zonas de cobertura, planes, solicitudes y órdenes de trabajo.
 # ======================================================
+from datetime import date
+
 from django.db import transaction
-from django.db.models import Case, Count, IntegerField, Max, Q, Sum, Value, When
+from django.db.models import Case, Count, IntegerField, Max, Prefetch, Q, Sum, Value, When
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from almacenes.models import Almacen
 from almacenes.pagination import CustomPageNumberPagination
 from contratos.models import Cliente, Contrato, PlanComercial
 from usuarios.auditoria import AuditoriaMixin
 from usuarios.permissions import PermisoPorRol
 
-from . import deuda
+from usuarios.models import Usuario
+
+from . import despacho, deuda, plazos, programacion
 from .management.commands.cargar_clientes import MARCA as MARCA_PRUEBA
-from .models import OrdenTrabajo, PlanAdicional, Solicitud, ZonaCobertura
+from .models import (Cuadrilla, Despacho, DespachoEquipo, DespachoMaterial, IntegranteCuadrilla, KitMaterial, OrdenTrabajo, PlanAdicional,
+                     Solicitud, Vehiculo, ZonaCobertura)
+from .programacion import ErrorProgramacion
 from .serializers import (
-    ClienteEditarSerializer, ClienteMiniSerializer, OrdenDetailSerializer, PlanAdicionalSerializer, OrdenListSerializer, PlanSerializer,
+    ClienteEditarSerializer, ClienteMiniSerializer, CuadrillaSerializer, DespachoSerializer, IntegranteSerializer, KitMaterialSerializer,
+    OrdenDetailSerializer,
+    PlanAdicionalSerializer, OrdenListSerializer, PlanSerializer,
     SolicitudCreateSerializer, SolicitudDetailSerializer, SolicitudEditarSerializer,
-    SolicitudListSerializer, ZonaCoberturaSerializer, crear_orden,
+    SolicitudListSerializer, TecnicoSerializer, VehiculoSerializer, ZonaCoberturaSerializer, crear_orden,
 )
 
 
@@ -30,6 +40,18 @@ def _lista(valor):
 def _texto(request, campo, minimo=5):
     texto = str(request.data.get(campo) or '').strip()
     return texto if len(texto) >= minimo else None
+
+
+def _fecha(valor):
+    """'2026-10-14' → date (None si no es válida)."""
+    try:
+        return date.fromisoformat(str(valor or '').strip())
+    except ValueError:
+        return None
+
+
+def _error(e):
+    return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ---------------- Zonas de cobertura ----------------
@@ -44,7 +66,7 @@ class ZonaCoberturaViewSet(AuditoriaMixin, viewsets.ModelViewSet):
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'cobertura'
     auditoria_modelo = ZonaCobertura
-    lectura_alternativa = [('solicitudes', 'leer'), ('solicitudes', 'crear'), ('ordenes', 'leer')]
+    lectura_alternativa = [('solicitudes', 'leer'), ('solicitudes', 'crear'), ('ordenes', 'leer'), ('cuadrillas', 'leer')]
     acciones_permiso = {'verificar': 'leer'}
     pagination_class = None
 
@@ -266,23 +288,35 @@ class SolicitudViewSet(AuditoriaMixin, viewsets.ModelViewSet):
 
 class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ReadOnlyModelViewSet):
     """
-    GET  /ordenes/?estado=&tipo=&zona=&search=
+    GET  /ordenes/?estado=&tipo=&zona=&cuadrilla=&fecha=&sin_cuadrilla=true&search=&plazo=vencidas|por_vencer
     GET  /ordenes/resumen/
-    POST /ordenes/{id}/anular/   { motivo }
-    (programar / ejecutar / verificar llegan con cuadrillas y la PWA)
+    POST /ordenes/{id}/anular/            { motivo }
+    GET  /ordenes/programacion/?fecha=&almacen=   cuadrillas activas con sus OT del día
+    POST /ordenes/{id}/programar/         { cuadrilla, fecha, motivo }   (motivo obligatorio si ya estaba programada)
+    POST /ordenes/programar_varias/       { ordenes: [ids], cuadrilla, fecha }
+    POST /ordenes/{id}/desasignar/        { motivo }   vuelve a PENDIENTE
+    POST /ordenes/{id}/no_ejecutada/      { motivo }   la cuadrilla no pudo hacer el trabajo
+    POST /ordenes/ordenar_visitas/        { cuadrilla, fecha, ordenes: [ids en orden] }
+    (EN CAMPO y EJECUTADA llegan desde la app del técnico, con las fotos)
     """
     permission_classes = [PermisoPorRol]
     recurso_permiso = 'ordenes'
     auditoria_modelo = OrdenTrabajo
     pagination_class = CustomPageNumberPagination
-    acciones_permiso = {'anular': 'actualizar', 'resumen': 'leer'}
-    auditoria_acciones = {'anular': 'Anular OT'}
+    acciones_permiso = {'anular': 'actualizar', 'resumen': 'leer', 'programacion': 'leer',
+                        'programar': 'actualizar', 'programar_varias': 'actualizar', 'desasignar': 'actualizar',
+                        'no_ejecutada': 'actualizar', 'ordenar_visitas': 'actualizar'}
+    auditoria_acciones = {'anular': 'Anular OT', 'programar': 'Programar OT', 'programar_varias': 'Programar OT',
+                          'desasignar': 'Desasignar OT', 'no_ejecutada': 'OT no ejecutada',
+                          'ordenar_visitas': 'Ordenar hoja del día'}
 
     def get_queryset(self):
         qs = OrdenTrabajo.objects.select_related(
-            'solicitud__cliente', 'solicitud__plan', 'solicitud__plan_tv', 'solicitud__plan_telefonia', 'solicitud__zona_cobertura')
+            'solicitud__cliente', 'solicitud__plan', 'solicitud__plan_tv', 'solicitud__plan_telefonia', 'solicitud__zona_cobertura',
+            'cuadrilla__vehiculo')
+        qs = plazos.con_ejecucion(qs)  # para saber si cumplió el plazo ATT sin consultas extra
         if self.action == 'retrieve':
-            qs = qs.prefetch_related('historial__usuario')
+            qs = qs.prefetch_related('historial__usuario', 'historial__cuadrilla_anterior', 'historial__cuadrilla_nueva')
         p = self.request.query_params
         if self.action == 'list':
             if p.get('estado'):
@@ -291,6 +325,14 @@ class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ReadOnlyModelViewSet):
                 qs = qs.filter(tipo__in=_lista(p['tipo']))
             if p.get('zona'):
                 qs = qs.filter(solicitud__zona_cobertura_id=p['zona'])
+            if p.get('cuadrilla'):
+                qs = qs.filter(cuadrilla_id=p['cuadrilla'])
+            if p.get('sin_cuadrilla') == 'true':
+                qs = qs.filter(cuadrilla__isnull=True)
+            if _fecha(p.get('fecha')):
+                qs = qs.filter(fecha_programada=_fecha(p['fecha']))
+            if p.get('plazo') in ('vencidas', 'por_vencer'):
+                qs = qs.filter(plazos.filtro(p['plazo']))
             q = (p.get('search') or '').strip()
             if q:
                 qs = qs.filter(Q(numero__icontains=q) | Q(solicitud__numero__icontains=q)
@@ -329,6 +371,324 @@ class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ReadOnlyModelViewSet):
         data = OrdenDetailSerializer(OrdenTrabajo.objects.get(pk=orden.pk)).data
         data['message'] = f'{orden.numero} anulada (y su solicitud {s.numero}).'
         return Response(data)
+
+    # ---- Programación ----
+
+    def _detalle(self, orden, message, avisos=None):
+        data = OrdenDetailSerializer(self.get_queryset().get(pk=orden.pk)).data
+        data['message'] = message
+        data['avisos'] = avisos or []
+        return Response(data)
+
+    @staticmethod
+    def _cuadrilla(request):
+        cuadrilla = Cuadrilla.objects.filter(pk=request.data.get('cuadrilla')).prefetch_related('zonas').first()
+        fecha = _fecha(request.data.get('fecha'))
+        errores = {}
+        if not cuadrilla:
+            errores['cuadrilla'] = ['Elige la cuadrilla.']
+        if not fecha:
+            errores['fecha'] = ['Indica la fecha.']
+        return cuadrilla, fecha, errores
+
+    @action(detail=False, methods=['get'])
+    def programacion(self, request):
+        """Tablero del día: cada cuadrilla activa con su carga, integrantes de esa fecha y sus OT en orden de visita."""
+        fecha = _fecha(request.query_params.get('fecha')) or timezone.localdate()
+        cuadrillas = (Cuadrilla.objects.filter(activo=True).select_related('almacen', 'vehiculo').prefetch_related('zonas')
+                      .order_by('nombre'))
+        if request.query_params.get('almacen'):
+            cuadrillas = cuadrillas.filter(almacen_id=request.query_params['almacen'])
+        cuadrillas = list(cuadrillas)
+        ordenes = (self.get_queryset().filter(cuadrilla__in=cuadrillas, fecha_programada=fecha)
+                   .exclude(estado=OrdenTrabajo.Estado.ANULADA).order_by('orden_visita', 'id'))
+        por_cuadrilla = {}
+        for o in ordenes:
+            por_cuadrilla.setdefault(o.cuadrilla_id, []).append(o)
+        despachos = {d.cuadrilla_id: d for d in Despacho.objects.filter(cuadrilla__in=cuadrillas, fecha=fecha)
+                     .exclude(estado=Despacho.Estado.ANULADO)}
+        # ONU instalada en cada OT (se asocia al instalarla) y cuántas lleva cada despacho
+        equipos = list(DespachoEquipo.objects.filter(despacho__in=despachos.values()).select_related('material'))
+        onus = {e.orden_id: e.material.gpon_serial for e in equipos if e.orden_id and e.resultado == DespachoEquipo.Resultado.INSTALADO}
+        n_onus = {}
+        for e in equipos:
+            n_onus[e.despacho_id] = n_onus.get(e.despacho_id, 0) + 1
+        integrantes = {}
+        for i in (IntegranteCuadrilla.objects.filter(cuadrilla__in=cuadrillas, desde__lte=fecha)
+                  .filter(Q(hasta__isnull=True) | Q(hasta__gte=fecha)).select_related('usuario')):
+            integrantes.setdefault(i.cuadrilla_id, []).append(i)
+        res = []
+        for c in cuadrillas:
+            lista = por_cuadrilla.get(c.id, [])
+            gente = sorted(integrantes.get(c.id, []), key=lambda i: (not i.es_jefe, i.desde))
+            res.append({
+                'id': c.id, 'nombre': c.nombre, 'capacidad_diaria': c.capacidad_diaria,
+                'almacen': {'id': c.almacen_id, 'nombre': c.almacen.nombre},
+                'vehiculo': {'placa': c.vehiculo.placa, 'descripcion': c.vehiculo.descripcion} if c.vehiculo_id else None,
+                'zonas': [{'id': z.id, 'nombre': z.nombre, 'color': z.color} for z in c.zonas.all()],
+                'integrantes': IntegranteSerializer(gente, many=True).data,
+                'lista_para_programar': len([i for i in gente if i.hasta is None]) >= Cuadrilla.MIN_INTEGRANTES
+                                        and any(i.es_jefe and i.hasta is None for i in gente),
+                'carga': len([o for o in lista if o.estado in programacion.OCUPAN]),
+                'despacho': ({'id': despachos[c.id].id, 'numero': despachos[c.id].numero, 'onus': n_onus.get(despachos[c.id].id, 0),
+                              'estado': {'codigo': despachos[c.id].estado, 'nombre': despachos[c.id].get_estado_display()}}
+                             if c.id in despachos else None),
+                'ordenes': [{**d, 'onu': onus.get(d['id'])} for d in OrdenListSerializer(lista, many=True).data],
+            })
+        # Despachos de días anteriores que la cuadrilla todavía no rindió (bloquean su próximo despacho)
+        sin_rendir = (Despacho.objects.filter(estado=Despacho.Estado.ENTREGADO, fecha__lt=timezone.localdate())
+                      .select_related('cuadrilla').order_by('fecha', 'cuadrilla__nombre'))
+        atrasadas = programacion.atrasadas()
+        if request.query_params.get('almacen'):
+            sin_rendir = sin_rendir.filter(almacen_id=request.query_params['almacen'])
+            atrasadas = atrasadas.filter(cuadrilla__almacen_id=request.query_params['almacen'])
+        return Response({'fecha': fecha, 'cuadrillas': res,
+                         # Plazo ATT de las OT en curso (solo aviso): {'vencidas', 'por_vencer'}
+                         'plazos': plazos.resumen(),
+                         # Programadas de días pasados sin ejecución registrada: no cambian de estado solas
+                         'atrasadas': [{'id': o.id, 'numero': o.numero, 'fecha': o.fecha_programada,
+                                        'cuadrilla': o.cuadrilla.nombre if o.cuadrilla_id else ''} for o in atrasadas],
+                         'sin_rendir': [{'id': d.id, 'numero': d.numero, 'fecha': d.fecha, 'cuadrilla': d.cuadrilla.nombre,
+                                         'cuadrilla_id': d.cuadrilla_id} for d in sin_rendir]})
+
+    @action(detail=True, methods=['post'])
+    def programar(self, request, pk=None):
+        orden = self.get_object()
+        cuadrilla, fecha, errores = self._cuadrilla(request)
+        if errores:
+            return Response(errores, status=status.HTTP_400_BAD_REQUEST)
+        reprograma = orden.estado == OrdenTrabajo.Estado.PROGRAMADA
+        try:
+            avisos = programacion.programar(orden, cuadrilla, fecha, request.user, request.data.get('motivo'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        verbo = 'reprogramada' if reprograma else 'programada'
+        return self._detalle(orden, f'{orden.numero} {verbo} para el {fecha:%d/%m/%Y} con {cuadrilla}.', avisos)
+
+    @action(detail=False, methods=['post'])
+    def programar_varias(self, request):
+        """Asigna varias OT pendientes a la misma cuadrilla y fecha (todo o nada)."""
+        cuadrilla, fecha, errores = self._cuadrilla(request)
+        ids = request.data.get('ordenes') or []
+        if not isinstance(ids, list) or not ids:
+            errores['ordenes'] = ['Selecciona al menos una OT.']
+        if errores:
+            return Response(errores, status=status.HTTP_400_BAD_REQUEST)
+        ordenes = list(OrdenTrabajo.objects.filter(pk__in=ids).order_by(
+            Case(When(prioridad='ALTA', then=Value(0)), default=Value(1), output_field=IntegerField()), 'created_at'))
+        if len(ordenes) != len(set(ids)):
+            return _error('Alguna OT ya no existe. Actualiza la pantalla.')
+        ya = [o.numero for o in ordenes if o.estado == OrdenTrabajo.Estado.PROGRAMADA]
+        if ya:
+            return _error(f'Ya están programadas: {", ".join(ya)}. Reprográmalas una por una indicando el motivo.')
+        avisos = []
+        try:
+            with transaction.atomic():
+                for o in ordenes:
+                    avisos += programacion.programar(o, cuadrilla, fecha, request.user)
+        except ErrorProgramacion as e:
+            return _error(e)
+        # El aviso de capacidad sale una vez por OT; basta el último
+        capacidad = [a for a in avisos if 'capacidad' in a][-1:]
+        avisos = [a for a in avisos if 'capacidad' not in a] + capacidad
+        return Response({'message': f'{len(ordenes)} OT programada(s) para el {fecha:%d/%m/%Y} con {cuadrilla}.',
+                         'avisos': avisos, 'ordenes': [o.numero for o in ordenes]})
+
+    @action(detail=True, methods=['post'])
+    def desasignar(self, request, pk=None):
+        orden = self.get_object()
+        try:
+            programacion.desasignar(orden, request.user, request.data.get('motivo'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._detalle(orden, f'{orden.numero} desasignada; volvió a pendientes.')
+
+    @action(detail=True, methods=['post'])
+    def no_ejecutada(self, request, pk=None):
+        orden = self.get_object()
+        try:
+            programacion.no_ejecutada(orden, request.user, request.data.get('motivo'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._detalle(orden, f'{orden.numero} quedó como no ejecutada; aparece en pendientes para reprogramarla.')
+
+    @action(detail=False, methods=['post'])
+    def ordenar_visitas(self, request):
+        cuadrilla, fecha, errores = self._cuadrilla(request)
+        if errores:
+            return Response(errores, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            programacion.ordenar_visitas(cuadrilla, fecha, request.data.get('ordenes') or [])
+        except ErrorProgramacion as e:
+            return _error(e)
+        return Response({'message': 'Orden de visita guardado.'})
+
+
+# ---------------- Vehículos y cuadrillas ----------------
+
+class VehiculoViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    """
+    GET    /vehiculos/?activos=true
+    POST   /vehiculos/            { placa, descripcion, observaciones, equipamiento: [{ nombre, cantidad, nota }] }
+    PATCH  /vehiculos/{id}/       (si viene equipamiento, reemplaza la lista)
+    DELETE /vehiculos/{id}/       solo si nunca se asignó a una cuadrilla (si no, se desactiva)
+    """
+    serializer_class = VehiculoSerializer
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'cuadrillas'
+    auditoria_modelo = Vehiculo
+    pagination_class = None
+    http_method_names = ['get', 'post', 'patch', 'delete']
+
+    def get_queryset(self):
+        qs = Vehiculo.objects.prefetch_related('equipamiento', 'cuadrillas')
+        if self.request.query_params.get('activos') == 'true':
+            qs = qs.filter(activo=True)
+        return qs.order_by('-activo', 'placa')
+
+    def destroy(self, request, *args, **kwargs):
+        vehiculo = self.get_object()
+        if vehiculo.cuadrillas.exists():
+            return _error('El vehículo ya se asignó a cuadrillas. Desactívalo en lugar de eliminarlo.')
+        return super().destroy(request, *args, **kwargs)
+
+
+class CuadrillaViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    """
+    GET    /cuadrillas/?activas=true&almacen=
+    POST   /cuadrillas/                         { nombre, almacen, vehiculo, zonas: [ids], capacidad_diaria, observaciones }
+    PATCH  /cuadrillas/{id}/
+    DELETE /cuadrillas/{id}/                    solo si nunca tuvo técnicos ni OT (si no, se desactiva)
+    GET    /cuadrillas/almacenes/               almacenes activos (para el formulario)
+    GET    /cuadrillas/tecnicos/                técnicos habilitados para campo que no están en ninguna cuadrilla
+    POST   /cuadrillas/{id}/agregar_tecnico/    { usuario, es_jefe }
+    POST   /cuadrillas/{id}/retirar_tecnico/    { usuario }   deja la cuadrilla desde hoy
+    POST   /cuadrillas/{id}/marcar_jefe/        { usuario }
+    POST   /cuadrillas/{id}/desactivar/ | /activar/
+    """
+    serializer_class = CuadrillaSerializer
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'cuadrillas'
+    # Quien programa OT necesita ver las cuadrillas
+    lectura_alternativa = [('ordenes', 'leer')]
+    auditoria_modelo = Cuadrilla
+    pagination_class = None
+    http_method_names = ['get', 'post', 'patch', 'delete']
+    acciones_permiso = {'tecnicos': 'leer', 'almacenes': 'leer', 'en_poder': 'leer', 'agregar_tecnico': 'actualizar',
+                        'retirar_tecnico': 'actualizar', 'marcar_jefe': 'actualizar'}
+    auditoria_acciones = {'agregar_tecnico': 'Agregar técnico a cuadrilla', 'retirar_tecnico': 'Retirar técnico de cuadrilla',
+                          'marcar_jefe': 'Cambiar jefe de cuadrilla', 'desactivar': 'Desactivar cuadrilla',
+                          'activar': 'Activar cuadrilla'}
+
+    def get_queryset(self):
+        abiertas = Q(ordenes__estado__in=(OrdenTrabajo.Estado.PROGRAMADA, OrdenTrabajo.Estado.EN_CAMPO))
+        qs = (Cuadrilla.objects.select_related('almacen', 'vehiculo')
+              .prefetch_related('zonas', Prefetch('integrantes', queryset=IntegranteCuadrilla.objects.select_related('usuario')))
+              .annotate(n_abiertas=Count('ordenes', filter=abiertas, distinct=True)))
+        p = self.request.query_params
+        if p.get('activas') == 'true':
+            qs = qs.filter(activo=True)
+        if p.get('almacen'):
+            qs = qs.filter(almacen_id=p['almacen'])
+        return qs.order_by('-activo', 'nombre')
+
+    def _respuesta(self, cuadrilla, message, code=status.HTTP_200_OK):
+        data = CuadrillaSerializer(self.get_queryset().get(pk=cuadrilla.pk)).data
+        data['message'] = message
+        return Response(data, status=code)
+
+    def create(self, request, *args, **kwargs):
+        ser = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        cuadrilla = ser.save(creado_por=request.user)
+        return self._respuesta(cuadrilla, f'Cuadrilla {cuadrilla} creada. Agrega sus técnicos.', status.HTTP_201_CREATED)
+
+    def destroy(self, request, *args, **kwargs):
+        cuadrilla = self.get_object()
+        if cuadrilla.ordenes.exists() or cuadrilla.integrantes.exists():
+            return _error('La cuadrilla ya tuvo técnicos u OT. Desactívala en lugar de eliminarla.')
+        return super().destroy(request, *args, **kwargs)
+
+    def _usuario(self, request):
+        return Usuario.objects.filter(pk=request.data.get('usuario')).select_related('rol').first()
+
+    @action(detail=False, methods=['get'])
+    def almacenes(self, request):
+        """Almacenes activos para elegir el de la cuadrilla (sin pedir permisos de almacenes)."""
+        return Response(list(Almacen.objects.filter(activo=True).order_by('nombre').values('id', 'codigo', 'nombre', 'ciudad')))
+
+    @action(detail=False, methods=['get'])
+    def tecnicos(self, request):
+        return Response(TecnicoSerializer(programacion.tecnicos_disponibles(), many=True).data)
+
+    @action(detail=True, methods=['post'])
+    def agregar_tecnico(self, request, pk=None):
+        cuadrilla = self.get_object()
+        usuario = self._usuario(request)
+        if not usuario:
+            return Response({'usuario': ['Elige el técnico.']}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            programacion.agregar_integrante(cuadrilla, usuario, bool(request.data.get('es_jefe')))
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(cuadrilla, f'{usuario.nombre_completo} se unió a {cuadrilla}.')
+
+    @action(detail=True, methods=['post'])
+    def retirar_tecnico(self, request, pk=None):
+        cuadrilla = self.get_object()
+        usuario = self._usuario(request)
+        if not usuario:
+            return Response({'usuario': ['Elige el técnico.']}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            integrante = programacion.retirar_integrante(cuadrilla, usuario)
+        except ErrorProgramacion as e:
+            return _error(e)
+        msg = f'{usuario.nombre_completo} dejó la cuadrilla {cuadrilla}.'
+        if integrante.es_jefe:
+            msg += ' Era el jefe: elige otro.'
+        return self._respuesta(cuadrilla, msg)
+
+    @action(detail=True, methods=['post'])
+    def marcar_jefe(self, request, pk=None):
+        cuadrilla = self.get_object()
+        usuario = self._usuario(request)
+        if not usuario:
+            return Response({'usuario': ['Elige el técnico.']}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            programacion.marcar_jefe(cuadrilla, usuario)
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(cuadrilla, f'{usuario.nombre_completo} es ahora el jefe de {cuadrilla}.')
+
+    @action(detail=True, methods=['post'])
+    def desactivar(self, request, pk=None):
+        cuadrilla = self.get_object()
+        try:
+            programacion.desactivar_cuadrilla(cuadrilla)
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(cuadrilla, f'Cuadrilla {cuadrilla} desactivada; sus técnicos quedaron libres.')
+
+    @action(detail=True, methods=['get'])
+    def en_poder(self, request, pk=None):
+        """Equipos y material que la cuadrilla tiene a su cargo (despachos sin rendir)."""
+        from .serializers import _onu
+        equipos, materiales = despacho.en_poder(self.get_object())
+        return Response({
+            'onus': [{**_onu(e.material), 'despacho': e.despacho.numero, 'fecha': e.despacho.fecha} for e in equipos],
+            'materiales': [{'nombre': x.material.modelo.nombre, 'cantidad': float(x.cantidad),
+                            'unidad': x.material.modelo.unidad_medida.simbolo if x.material.modelo.unidad_medida_id else '',
+                            'despacho': x.despacho.numero} for x in materiales],
+        })
+
+    @action(detail=True, methods=['post'])
+    def activar(self, request, pk=None):
+        cuadrilla = self.get_object()
+        if cuadrilla.vehiculo_id and Cuadrilla.objects.filter(vehiculo_id=cuadrilla.vehiculo_id, activo=True).exists():
+            return _error('Su vehículo ya está en otra cuadrilla activa. Cámbialo antes de activarla.')
+        cuadrilla.activo = True
+        cuadrilla.save(update_fields=['activo', 'updated_at'])
+        return self._respuesta(cuadrilla, f'Cuadrilla {cuadrilla} activada. Revisa sus técnicos.')
 
 
 # ---------------- Clientes (ficha: datos, contratos, deuda, solicitudes) ----------------
@@ -436,3 +796,208 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
             'monto_total': float(datos['monto'] or 0), 'fecha_corte': datos['corte'],
             'facturas_bloqueo': lim, 'tipos_bloqueados': list(deuda.tipos_bloqueados()),
         })
+
+
+# ---------------- Despacho y rendición ----------------
+
+class DespachoViewSet(AuditoriaMixin, viewsets.GenericViewSet):
+    """
+    GET  /despachos/?fecha=&cuadrilla=&estado=
+    GET  /despachos/{id}/                         con las OT del día de la cuadrilla (para la rendición)
+    GET  /despachos/requerimiento/?cuadrilla=&fecha=
+         OT del día con sus servicios, ONU disponibles (con TV/telefonía), material sugerido por los kits
+    GET  /despachos/buscar/?cuadrilla=&serie=     ONU escaneada (GPON SN, MAC o código interno) en el almacén de la cuadrilla
+    GET  /despachos/disponibles/?cuadrilla=&search=&modelo=&tv=&telefonia=   buscador de ONU disponibles (FIFO, paginado)
+    GET  /despachos/sugerir/?cuadrilla=&fecha=&ya=1,2   ONU (FIFO) que cubren las instalaciones del día que faltan
+    POST /despachos/                              { cuadrilla, fecha, onus: [ids], materiales: [{ material, cantidad }], observaciones }
+    POST /despachos/{id}/rendir/                  { equipos: [{ id, resultado, orden }],
+                                                    materiales: [{ id, devuelta, consumos: [{ orden, cantidad }] }],
+                                                    recuperados: [{ orden, serial, observacion }], observaciones }
+    POST /despachos/{id}/anular/                  { motivo }   todo vuelve al almacén
+    """
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'despachos'
+    lectura_alternativa = [('ordenes', 'leer')]
+    auditoria_modelo = Despacho
+    pagination_class = CustomPageNumberPagination
+    acciones_permiso = {'requerimiento': 'leer', 'buscar': 'leer', 'disponibles': 'leer', 'sugerir': 'leer',
+                        'rendir': 'actualizar', 'anular': 'actualizar'}
+    auditoria_acciones = {'rendir': 'Rendición de cuadrilla', 'anular': 'Anular despacho'}
+
+    def get_queryset(self):
+        qs = Despacho.objects.select_related('cuadrilla__vehiculo', 'almacen', 'entregado_por', 'rendido_por').prefetch_related(
+            Prefetch('equipos', queryset=DespachoEquipo.objects.select_related('orden', 'material__modelo__marca')),
+            Prefetch('materiales', queryset=DespachoMaterial.objects.select_related('material__modelo__unidad_medida', 'material__lote')
+                     .prefetch_related('consumos__orden')),
+            'recuperados__orden')
+        p = self.request.query_params
+        if _fecha(p.get('fecha')):
+            qs = qs.filter(fecha=_fecha(p['fecha']))
+        if p.get('cuadrilla'):
+            qs = qs.filter(cuadrilla_id=p['cuadrilla'])
+        if p.get('estado'):
+            qs = qs.filter(estado__in=_lista(p['estado']))
+        return qs.order_by('-fecha', 'cuadrilla__nombre')
+
+    def _respuesta(self, d, message, code=status.HTTP_200_OK, avisos=None):
+        data = DespachoSerializer(self.get_queryset().get(pk=d.pk), context={'con_ordenes': True}).data
+        data['message'] = message
+        data['avisos'] = avisos or []
+        return Response(data, status=code)
+
+    def list(self, request):
+        pagina = self.paginate_queryset(self.get_queryset())
+        return self.get_paginated_response(DespachoSerializer(pagina, many=True).data)
+
+    def retrieve(self, request, pk=None):
+        return Response(DespachoSerializer(self.get_object(), context={'con_ordenes': True}).data)
+
+    @staticmethod
+    def _cuadrilla(request):
+        return Cuadrilla.objects.select_related('almacen').filter(pk=request.query_params.get('cuadrilla')).first()
+
+    @action(detail=False, methods=['get'])
+    def requerimiento(self, request):
+        from .serializers import _granel, _onu, _ot_corta
+        cuadrilla = self._cuadrilla(request)
+        fecha = _fecha(request.query_params.get('fecha'))
+        if not cuadrilla or not fecha:
+            return _error('Indica la cuadrilla y la fecha.')
+        a = cuadrilla.almacen
+        ots, material = despacho.requerimiento(cuadrilla, fecha)
+        granel = list(despacho.granel_disponible(a))
+        actual = (Despacho.objects.filter(cuadrilla=cuadrilla, fecha=fecha).exclude(estado=Despacho.Estado.ANULADO)
+                  .prefetch_related(Prefetch('equipos', queryset=DespachoEquipo.objects.select_related('material__modelo__marca'))).first())
+        previo = despacho.pendiente_de_rendir(cuadrilla, excluir_fecha=fecha)
+        return Response({
+            'almacen': {'id': a.id, 'nombre': a.nombre},
+            'ordenes': [{**_ot_corta(o), 'lleva_onu': o.tipo in despacho.TIPOS_CON_ONU,
+                         'onu_obligatoria': o.tipo == Solicitud.Tipo.INSTALACION} for o in ots],
+            'onus_disponibles': despacho.onus_disponibles(a).count(),
+            'modelos': [{'id': m.id, 'nombre': f'{m.marca.nombre} {m.nombre}' if m.marca_id else m.nombre, 'disponibles': n,
+                         'tv': m.soporta_tv, 'telefonia': m.soporta_telefonia} for m, n in despacho.modelos_disponibles(a)],
+            'material': [{'modelo_id': f['modelo'].id, 'nombre': f['modelo'].nombre,
+                          'unidad': f['modelo'].unidad_medida.simbolo if f['modelo'].unidad_medida_id else '',
+                          'sugerido': float(f['cantidad'])} for f in material],
+            'granel': [_granel(m) for m in granel],
+            'despacho': ({'id': actual.id, 'numero': actual.numero, 'estado': actual.estado,
+                          'onus': [_onu(e.material) for e in actual.equipos.all()]} if actual else None),
+            'pendiente_previo': {'numero': previo.numero, 'fecha': previo.fecha} if previo else None,
+        })
+
+    @action(detail=False, methods=['get'])
+    def buscar(self, request):
+        from .serializers import _onu
+        cuadrilla = self._cuadrilla(request)
+        serie = (request.query_params.get('serie') or '').strip()
+        if not cuadrilla or not serie:
+            return _error('Indica la cuadrilla y la serie.')
+        m = despacho._buscar_onu(serie)
+        if not m:
+            return _error(f'No hay ninguna ONU registrada con la serie {serie}.')
+        if m.almacen_actual_id != cuadrilla.almacen_id:
+            return _error(f'La ONU {m.gpon_serial} está en {m.almacen_actual.nombre}, no en {cuadrilla.almacen.nombre}.')
+        if m.traspaso_actual_id or not m.estado_onu_id or m.estado_onu.codigo != 'DISPONIBLE':
+            estado = m.estado_onu.nombre if m.estado_onu_id else 'sin estado'
+            return _error(f'La ONU {m.gpon_serial} está {estado.lower()}; solo se despachan ONU disponibles.')
+        return Response(_onu(m))
+
+    @action(detail=False, methods=['get'])
+    def disponibles(self, request):
+        from .serializers import _onu
+        cuadrilla = self._cuadrilla(request)
+        if not cuadrilla:
+            return _error('Indica la cuadrilla.')
+        p = request.query_params
+        qs = despacho.buscar_disponibles(cuadrilla.almacen, p.get('search'), p.get('modelo') or None,
+                                         {'tv': p.get('tv') == 'true', 'telefonia': p.get('telefonia') == 'true'})
+        pagina = self.paginate_queryset(qs)
+        return self.get_paginated_response([{**_onu(m), 'lote': m.lote.numero_lote if m.lote_id else ''} for m in pagina])
+
+    @action(detail=False, methods=['get'])
+    def sugerir(self, request):
+        from .serializers import _onu
+        cuadrilla = self._cuadrilla(request)
+        fecha = _fecha(request.query_params.get('fecha'))
+        if not cuadrilla or not fecha:
+            return _error('Indica la cuadrilla y la fecha.')
+        try:
+            ya = [int(x) for x in _lista(request.query_params.get('ya') or '')]
+        except ValueError:
+            return _error('Lista de ONU no válida.')
+        onus, sin_stock = despacho.sugerir_onus(cuadrilla, fecha, ya)
+        return Response({'onus': [{**_onu(m), 'lote': m.lote.numero_lote if m.lote_id else ''} for m in onus],
+                         'sin_stock': sin_stock})
+
+    def create(self, request):
+        d = request.data
+        cuadrilla = Cuadrilla.objects.select_related('almacen').filter(pk=d.get('cuadrilla')).first()
+        fecha = _fecha(d.get('fecha'))
+        if not cuadrilla or not fecha:
+            return _error('Indica la cuadrilla y la fecha.')
+        try:
+            onus = [int(x) for x in (d.get('onus') or [])]
+            materiales = [(int(x['material']), x['cantidad']) for x in (d.get('materiales') or [])]
+        except (TypeError, ValueError, KeyError):
+            return _error('Datos de equipos o materiales no válidos.')
+        try:
+            des, avisos = despacho.despachar(cuadrilla, fecha, onus, materiales, request.user, d.get('observaciones') or '')
+        except programacion.ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(des, f'Despacho {des.numero} registrado: {cuadrilla} sale con {des.equipos.count()} ONU.',
+                               status.HTTP_201_CREATED, avisos)
+
+    @action(detail=True, methods=['post'])
+    def rendir(self, request, pk=None):
+        des = self.get_object()
+        d = request.data
+
+        def _id(v):
+            return int(v) if v not in (None, '') else None
+        try:
+            equipos = {int(x['id']): (x.get('resultado'), _id(x.get('orden'))) for x in (d.get('equipos') or [])}
+            consumos, devoluciones = {}, {}
+            for x in (d.get('materiales') or []):
+                consumos[int(x['id'])] = {int(c['orden']): c.get('cantidad') for c in (x.get('consumos') or [])}
+                devoluciones[int(x['id'])] = x.get('devuelta')
+            recuperados = [(_id(x.get('orden')), x.get('serial'), x.get('observacion') or '') for x in (d.get('recuperados') or [])]
+        except (TypeError, ValueError, KeyError):
+            return _error('Datos de la rendición no válidos.')
+        try:
+            despacho.rendir(des, equipos, consumos, devoluciones, recuperados, request.user, d.get('observaciones') or '')
+        except programacion.ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(des, f'Rendición del despacho {des.numero} registrada.')
+
+    @action(detail=True, methods=['post'])
+    def anular(self, request, pk=None):
+        des = self.get_object()
+        try:
+            despacho.anular(des, request.user, request.data.get('motivo'))
+        except programacion.ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(des, f'Despacho {des.numero} anulado; todo volvió a {des.almacen.nombre}.')
+
+
+class KitMaterialViewSet(AuditoriaMixin, viewsets.ModelViewSet):
+    """
+    Material estándar por tipo de trabajo (sugiere el despacho del día).
+    GET/POST /kits/   PATCH/DELETE /kits/{id}/   GET /kits/materiales/  (modelos de material por cantidad)
+    """
+    serializer_class = KitMaterialSerializer
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'cuadrillas'
+    lectura_alternativa = [('despachos', 'leer')]
+    auditoria_modelo = KitMaterial
+    pagination_class = None
+    http_method_names = ['get', 'post', 'patch', 'delete']
+    acciones_permiso = {'materiales': 'leer'}
+
+    def get_queryset(self):
+        return KitMaterial.objects.select_related('modelo__unidad_medida').order_by('tipo', 'condicion', 'modelo__nombre')
+
+    @action(detail=False, methods=['get'])
+    def materiales(self, request):
+        from almacenes.models import Modelo
+        qs = Modelo.objects.filter(activo=True, tipo_material__es_unico=False).select_related('unidad_medida').order_by('nombre')
+        return Response([{'id': m.id, 'nombre': m.nombre, 'unidad': m.unidad_medida.simbolo if m.unidad_medida_id else ''} for m in qs])
