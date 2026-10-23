@@ -5,3 +5,8 @@ __pycache__/
 media/
 staticfiles/
 .env
+
+# Datos reales de COTEL (padrón, facturación): nunca al repositorio
+*.csv
+*.xlsx
+*.xls

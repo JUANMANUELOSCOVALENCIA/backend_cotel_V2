@@ -19,9 +19,10 @@ from usuarios.permissions import PermisoPorRol
 
 from usuarios.models import Usuario
 
-from . import despacho, deuda, plazos, programacion
+from . import campo, despacho, deuda, inventario, plazos, programacion
 from .management.commands.cargar_clientes import MARCA as MARCA_PRUEBA
-from .models import (Cuadrilla, Despacho, DespachoEquipo, DespachoMaterial, IntegranteCuadrilla, KitMaterial, OrdenTrabajo, PlanAdicional,
+from .models import (Cuadrilla, Despacho, DespachoEquipo, DespachoMaterial, EvidenciaOT, IntegranteCuadrilla, KitMaterial, OrdenTrabajo,
+                     ParametroEOQ, PlanAdicional,
                      Solicitud, Vehiculo, ZonaCobertura)
 from .programacion import ErrorProgramacion
 from .serializers import (
@@ -29,7 +30,7 @@ from .serializers import (
     OrdenDetailSerializer,
     PlanAdicionalSerializer, OrdenListSerializer, PlanSerializer,
     SolicitudCreateSerializer, SolicitudDetailSerializer, SolicitudEditarSerializer,
-    SolicitudListSerializer, TecnicoSerializer, VehiculoSerializer, ZonaCoberturaSerializer, crear_orden,
+    SolicitudListSerializer, TecnicoSerializer, VehiculoSerializer, ZonaCoberturaSerializer, _evidencia, crear_orden,
 )
 
 
@@ -303,7 +304,7 @@ class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ReadOnlyModelViewSet):
     recurso_permiso = 'ordenes'
     auditoria_modelo = OrdenTrabajo
     pagination_class = CustomPageNumberPagination
-    acciones_permiso = {'anular': 'actualizar', 'resumen': 'leer', 'programacion': 'leer',
+    acciones_permiso = {'anular': 'actualizar', 'resumen': 'leer', 'programacion': 'leer', 'foto': 'leer', 'indicadores': 'leer',
                         'programar': 'actualizar', 'programar_varias': 'actualizar', 'desasignar': 'actualizar',
                         'no_ejecutada': 'actualizar', 'ordenar_visitas': 'actualizar'}
     auditoria_acciones = {'anular': 'Anular OT', 'programar': 'Programar OT', 'programar_varias': 'Programar OT',
@@ -450,6 +451,41 @@ class OrdenTrabajoViewSet(AuditoriaMixin, viewsets.ReadOnlyModelViewSet):
                                         'cuadrilla': o.cuadrilla.nombre if o.cuadrilla_id else ''} for o in atrasadas],
                          'sin_rendir': [{'id': d.id, 'numero': d.numero, 'fecha': d.fecha, 'cuadrilla': d.cuadrilla.nombre,
                                          'cuadrilla_id': d.cuadrilla_id} for d in sin_rendir]})
+
+    @action(detail=False, methods=['get'])
+    def indicadores(self, request):
+        """Para el dashboard: OT abiertas por estado, plazo ATT y cumplimiento del mes (TIS instalación/traslado, TRF reparación)."""
+        E = OrdenTrabajo.Estado
+        hoy = timezone.localdate()
+        abiertas = OrdenTrabajo.objects.filter(estado__in=OrdenTrabajo.ABIERTAS)
+        por_estado = dict(abiertas.values_list('estado').annotate(n=Count('id')))
+        inicio = hoy.replace(day=1)
+        hechas = (plazos.con_ejecucion(OrdenTrabajo.objects.filter(estado__in=(E.EJECUTADA, E.VERIFICADA, E.CERRADA),
+                                                                     tipo__in=plazos.CON_PLAZO))
+                  .filter(ejecutada_at__date__gte=inicio).select_related('solicitud'))
+        att = {'TIS': [0, 0], 'TRF': [0, 0]}
+        for o in hechas:
+            p = plazos.plazo(o)
+            if p and p['estado'] in ('CUMPLIDO', 'INCUMPLIDO'):
+                k = 'TRF' if o.tipo == Solicitud.Tipo.REPARACION else 'TIS'
+                att[k][1] += 1
+                att[k][0] += p['estado'] == 'CUMPLIDO'
+        return Response({
+            'por_estado': {e: por_estado.get(e, 0) for e in OrdenTrabajo.ABIERTAS},
+            'abiertas': sum(por_estado.values()),
+            'plazos': plazos.resumen(),
+            'mes': inicio,
+            'att': {k: {'en_plazo': v[0], 'total': v[1], 'porcentaje': round(v[0] * 100 / v[1], 1) if v[1] else None, 'meta': 85}
+                    for k, v in att.items()},
+        })
+
+    @action(detail=True, methods=['get'], url_path=r'foto/(?P<evidencia_id>\d+)')
+    def foto(self, request, pk=None, evidencia_id=None):
+        """Imagen de una evidencia de la OT (fotos que tomó el técnico)."""
+        e = EvidenciaOT.objects.filter(pk=evidencia_id, orden_id=pk).first()
+        if not e:
+            return Response({'error': 'Foto no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return _foto(e)
 
     @action(detail=True, methods=['post'])
     def programar(self, request, pk=None):
@@ -695,7 +731,7 @@ class CuadrillaViewSet(AuditoriaMixin, viewsets.ModelViewSet):
 
 class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
     """
-    GET   /clientes/?search=&situacion=deuda|bloqueado|al_dia&prueba=true|false
+    GET   /clientes/?search=&situacion=deuda|bloqueado|al_dia
     GET   /clientes/resumen/
     GET   /clientes/{id}/         ficha completa
     PATCH /clientes/{id}/         corregir datos de contacto
@@ -732,9 +768,6 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
             qs = qs.filter(peor__gte=lim)
         elif situacion == 'al_dia':
             qs = qs.filter(Q(facturas=0) | Q(facturas__isnull=True))
-        if p.get('prueba') in ('true', 'false'):
-            filtro = Q(observaciones__startswith=MARCA_PRUEBA)
-            qs = qs.filter(filtro) if p['prueba'] == 'true' else qs.exclude(filtro)
         orden = {'deuda': ('-monto', 'apellidos'), 'bloqueado': ('-monto', 'apellidos')}.get(situacion, ('apellidos', 'nombres'))
         qs = qs.order_by(*orden, 'id')
         pagina = self.paginate_queryset(qs)
@@ -743,7 +776,6 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
             'zona': c.zona, 'ciudad': c.ciudad, 'contratos': c.n_contratos,
             'facturas': c.facturas or 0, 'monto': float(c.monto or 0),
             'situacion': 'bloqueado' if (c.peor or 0) >= lim else 'deuda' if (c.facturas or 0) > 0 else 'al_dia',
-            'prueba': c.observaciones.startswith(MARCA_PRUEBA),
         } for c in pagina])
 
     def _ficha(self, c):
@@ -756,7 +788,6 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
             'nombre': f'{c.nombres} {c.apellidos}'.strip(), 'telefono': c.telefono,
             'telefono_alternativo': c.telefono_alternativo, 'email': c.email, 'direccion': c.direccion,
             'zona': c.zona, 'ciudad': c.ciudad, 'estado': c.estado, 'fecha_registro': c.fecha_registro,
-            'prueba': c.observaciones.startswith(MARCA_PRUEBA),
             'contratos': [{
                 'id': k.id, 'numero': k.numero_contrato,
                 'servicios': [s.plan_comercial.nombre for s in k.servicios.all()],
@@ -776,7 +807,7 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
         nombre_cambio = any(k in ser.validated_data and ser.validated_data[k] != getattr(c, k) for k in ('nombres', 'apellidos'))
         c = ser.save()
         if nombre_cambio and c.observaciones.startswith(MARCA_PRUEBA):
-            # Ya tiene datos reales: la carga de prueba no lo volverá a pisar
+            # Uso interno: el comando de carga no vuelve a pisar un cliente corregido a mano
             c.observaciones = ''
             c.save(update_fields=['observaciones', 'updated_at'])
         datos = self._ficha(c)
@@ -790,7 +821,6 @@ class ClientesViewSet(AuditoriaMixin, viewsets.GenericViewSet):
         datos = con_deuda.aggregate(corte=Max('deuda_actualizada'), monto=Sum('monto_deuda'))
         return Response({
             'clientes': Cliente.objects.count(),
-            'prueba': Cliente.objects.filter(observaciones__startswith=MARCA_PRUEBA).count(),
             'con_deuda': con_deuda.values('cliente_id').distinct().count(),
             'bloqueados': Contrato.objects.filter(facturas_pendientes__gte=lim).values('cliente_id').distinct().count(),
             'monto_total': float(datos['monto'] or 0), 'fecha_corte': datos['corte'],
@@ -1001,3 +1031,177 @@ class KitMaterialViewSet(AuditoriaMixin, viewsets.ModelViewSet):
         from almacenes.models import Modelo
         qs = Modelo.objects.filter(activo=True, tipo_material__es_unico=False).select_related('unidad_medida').order_by('nombre')
         return Response([{'id': m.id, 'nombre': m.nombre, 'unidad': m.unidad_medida.simbolo if m.unidad_medida_id else ''} for m in qs])
+
+
+# ---------------- App de campo (técnico) ----------------
+
+def _foto(evidencia):
+    from django.http import FileResponse
+    import mimetypes
+    nombre = evidencia.imagen.name
+    return FileResponse(evidencia.imagen.open('rb'), content_type=mimetypes.guess_type(nombre)[0] or 'image/jpeg')
+
+
+class CampoViewSet(viewsets.GenericViewSet):
+    """
+    App del técnico (mismo sistema, recurso `campo`). Todo sobre la cuadrilla vigente del usuario.
+    GET  /campo/mis-trabajos/?fecha=      OT del día (y pendientes de días anteriores), lo que tiene a cargo, motivos
+    POST /campo/{id}/iniciar/             { lat, lng }            llegó al domicilio → En campo
+    POST /campo/{id}/evidencia/           multipart: imagen, lat, lng, precision, tipo (ONU | ADICIONAL)
+    POST /campo/{id}/ejecutar/            { onu, materiales: [{ id, cantidad }], serial_recuperado, observaciones, lat, lng }
+    POST /campo/{id}/no-se-pudo/          { motivo, detalle }
+    GET  /campo/foto/{evidencia_id}/      imagen de una evidencia de su cuadrilla
+    """
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'campo'
+    acciones_permiso = {'mis_trabajos': 'leer', 'foto': 'leer', 'iniciar': 'actualizar', 'evidencia': 'actualizar',
+                        'ejecutar': 'actualizar', 'no_se_pudo': 'actualizar'}
+
+    def get_queryset(self):
+        return OrdenTrabajo.objects.none()
+
+    def _orden(self, orden, cuadrilla):
+        from .serializers import _onu, _ot_corta
+        s = orden.solicitud
+        datos = OrdenListSerializer(orden).data
+        evid = [_evidencia(e) for e in orden.evidencias.all()]
+        rep = getattr(orden, 'reporte_campo', None) if orden.estado in (OrdenTrabajo.Estado.EJECUTADA, OrdenTrabajo.Estado.VERIFICADA,
+                                                                       OrdenTrabajo.Estado.CERRADA) else None
+        return {**datos, 'servicios': _ot_corta(orden)['servicios'], 'referencia': s.referencia,
+                'lleva_onu': orden.tipo in despacho.TIPOS_CON_ONU, 'onu_obligatoria': orden.tipo == Solicitud.Tipo.INSTALACION,
+                'recupera': orden.tipo in despacho.TIPOS_RECUPERAN, 'evidencias': evid,
+                'foto_onu': any(e['tipo']['codigo'] == 'ONU' and e['estado']['codigo'] != 'RECHAZADA' for e in evid),
+                'reporte': rep and {'onu': _onu(rep.despacho_equipo.material) if rep.despacho_equipo_id else None,
+                                    'serial_recuperado': rep.serial_recuperado, 'observaciones': rep.observaciones}}
+
+    @action(detail=False, methods=['get'], url_path='mis-trabajos')
+    def mis_trabajos(self, request):
+        from .serializers import _onu
+        cuadrilla = campo.cuadrilla_de(request.user)
+        if not cuadrilla:
+            return Response({'cuadrilla': None, 'ordenes': [], 'previas': [], 'onus': [], 'materiales': [],
+                             'motivos': [{'codigo': c, 'nombre': n} for c, n, _ in campo.MOTIVOS]})
+        fecha = _fecha(request.query_params.get('fecha')) or timezone.localdate()
+        previas, del_dia = campo.mis_ordenes(cuadrilla, fecha)
+        gente = cuadrilla.integrantes_en(fecha).select_related('usuario')
+        lineas = list(campo.material_a_cargo(cuadrilla))
+        return Response({
+            'fecha': fecha, 'radio_m': campo.RADIO_M,
+            'cuadrilla': {'id': cuadrilla.id, 'nombre': cuadrilla.nombre,
+                          'vehiculo': cuadrilla.vehiculo.placa if cuadrilla.vehiculo_id else None,
+                          'integrantes': [{'nombre': i.usuario.nombre_completo, 'es_jefe': i.es_jefe} for i in gente]},
+            'previas': [self._orden(o, cuadrilla) for o in previas],
+            'ordenes': [self._orden(o, cuadrilla) for o in del_dia],
+            'onus': [{**_onu(e.material), 'id': e.id, 'despacho': e.despacho.numero} for e in campo.onus_a_cargo(cuadrilla)],
+            'materiales': [{'id': m.id, 'nombre': m.material.modelo.nombre,
+                            'unidad': m.material.modelo.unidad_medida.simbolo if m.material.modelo.unidad_medida_id else '',
+                            'entregado': float(m.cantidad), 'disponible': float(m.cantidad - campo.reportado(m))} for m in lineas],
+            'motivos': [{'codigo': c, 'nombre': n} for c, n, _ in campo.MOTIVOS],
+        })
+
+    def _respuesta(self, request, orden_id, message, **extra):
+        cuadrilla = campo.cuadrilla_de(request.user)
+        o = (OrdenTrabajo.objects.select_related('solicitud__cliente', 'solicitud__plan', 'solicitud__plan_tv',
+                                                 'solicitud__plan_telefonia', 'solicitud__zona_cobertura', 'cuadrilla__vehiculo')
+             .prefetch_related('evidencias').get(pk=orden_id))
+        return Response({'orden': self._orden(o, cuadrilla), 'message': message, **extra})
+
+    @action(detail=True, methods=['post'])
+    def iniciar(self, request, pk=None):
+        try:
+            orden, d = campo.iniciar(request.user, pk, request.data.get('lat'), request.data.get('lng'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        aviso = f' Estás a {d:.0f} m del domicilio: las fotos deben tomarse a menos de {campo.RADIO_M} m.' if d > campo.RADIO_M else ''
+        return self._respuesta(request, orden.pk, f'{orden.numero}: en campo.{aviso}')
+
+    @action(detail=True, methods=['post'])
+    def evidencia(self, request, pk=None):
+        archivo = request.FILES.get('imagen')
+        if not archivo:
+            return _error('No llegó la foto.')
+        d = request.data
+        try:
+            ev = campo.registrar_evidencia(request.user, pk, archivo, d.get('lat'), d.get('lng'), d.get('tipo') or 'ONU',
+                                           d.get('precision'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        ok = ev.estado != EvidenciaOT.Estado.RECHAZADA
+        return self._respuesta(request, pk, 'Foto registrada.' if ok else f'Foto rechazada: {ev.motivo}', evidencia=_evidencia(ev))
+
+    @action(detail=True, methods=['post'])
+    def ejecutar(self, request, pk=None):
+        d = request.data
+        try:
+            materiales = [(int(m['id']), m.get('cantidad')) for m in (d.get('materiales') or [])]
+            onu = int(d['onu']) if d.get('onu') not in (None, '') else None
+        except (TypeError, ValueError, KeyError):
+            return _error('Datos no válidos.')
+        try:
+            orden = campo.ejecutar(request.user, pk, onu, materiales, d.get('serial_recuperado') or '', d.get('observaciones') or '',
+                                   d.get('lat'), d.get('lng'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(request, orden.pk, f'{orden.numero} registrada como ejecutada.')
+
+    @action(detail=True, methods=['post'], url_path='no-se-pudo')
+    def no_se_pudo(self, request, pk=None):
+        try:
+            orden = campo.no_se_pudo(request.user, pk, request.data.get('motivo'), request.data.get('detalle'))
+        except ErrorProgramacion as e:
+            return _error(e)
+        return self._respuesta(request, orden.pk, f'{orden.numero} registrada como no ejecutada.')
+
+    @action(detail=False, methods=['get'], url_path=r'foto/(?P<evidencia_id>\d+)')
+    def foto(self, request, evidencia_id=None):
+        cuadrilla = campo.cuadrilla_de(request.user)
+        e = EvidenciaOT.objects.filter(pk=evidencia_id, orden__cuadrilla=cuadrilla).first() if cuadrilla else None
+        if not e:
+            return Response({'error': 'Foto no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return _foto(e)
+
+
+# ---------------- Inventario: EOQ ----------------
+
+class InventarioViewSet(AuditoriaMixin, viewsets.GenericViewSet):
+    """
+    GET  /inventario/eoq/            EOQ, punto de reorden, stock y cobertura por modelo (consumo real; si no hay, D estimada)
+    POST /inventario/parametros/     { modelo (vacío = por defecto), S, H, L, D_estimada }
+    """
+    permission_classes = [PermisoPorRol]
+    recurso_permiso = 'materiales'
+    lectura_alternativa = [('ordenes', 'leer')]
+    auditoria_modelo = ParametroEOQ
+    acciones_permiso = {'eoq': 'leer', 'parametros': 'actualizar'}
+    auditoria_acciones = {'parametros': 'Parámetros EOQ'}
+
+    def get_queryset(self):
+        return ParametroEOQ.objects.all()
+
+    @action(detail=False, methods=['get'])
+    def eoq(self, request):
+        return Response(inventario.calcular())
+
+    @action(detail=False, methods=['post'])
+    def parametros(self, request):
+        from decimal import Decimal, InvalidOperation
+        from almacenes.models import Modelo
+        d = request.data
+        try:
+            S, H = Decimal(str(d.get('S'))), Decimal(str(d.get('H')))
+            L = int(d.get('L'))
+            D = int(d['D_estimada']) if d.get('D_estimada') not in (None, '') else None
+        except (InvalidOperation, TypeError, ValueError, KeyError):
+            return _error('Revisa los valores: S y H en bolivianos, L en días y D en unidades por año.')
+        if S <= 0 or H <= 0 or L <= 0 or (D is not None and D <= 0):
+            return _error('Los valores deben ser mayores a cero.')
+        modelo = None
+        if d.get('modelo'):
+            modelo = Modelo.objects.filter(pk=d['modelo']).first()
+            if not modelo:
+                return _error('Modelo no encontrado.')
+        ParametroEOQ.objects.update_or_create(modelo=modelo, defaults={
+            'costo_pedido': S, 'costo_mantener': H, 'tiempo_entrega': L, 'demanda_estimada': D, 'updated_by': request.user})
+        datos = inventario.calcular()
+        datos['message'] = 'Parámetros guardados.'
+        return Response(datos)

@@ -7,8 +7,8 @@
 #   tensor/gancho de retención para drop, grapas.
 # Las ONU NO van aquí: son equipos con serie y se registran por lotes en Almacenes.
 #
-#   --inventario   además crea un LOTE DE PRUEBA con stock de estos materiales en cada almacén
-#                  activo (proveedor "Proveedor de prueba"), para probar el despacho.
+#   --inventario   además crea un lote de stock inicial de estos materiales en cada almacén activo
+#                  (proveedor "Distribuidora FTTH"), para poder despachar. Solo para desarrollo.
 #
 # Se puede ejecutar varias veces: no duplica (busca por nombre) y no cambia lo que ya editaste.
 # Los kits y cantidades se ajustan en Operaciones › Cuadrillas › Kits de material.
@@ -25,7 +25,7 @@ from almacenes.models import (Almacen, EstadoLote, EstadoMaterialGeneral, Lote, 
 from operaciones.models import KitMaterial
 from usuarios.models import Usuario
 
-# (código de tipo, nombre del tipo, unidad, nombre del modelo, descripción, stock de prueba)
+# (código de tipo, nombre del tipo, unidad, nombre del modelo, descripción, stock inicial)
 MATERIALES = [
     ('DROP', 'Cable drop', 'm', 'Cable drop FTTH 1 hilo', 'Acometida de fibra desde la NAP hasta el domicilio', 3000),
     ('ROSETA', 'Roseta óptica', 'pza', 'Roseta óptica 1 puerto SC/APC', 'Terminación del drop dentro del domicilio', 100),
@@ -57,10 +57,10 @@ KITS = [
 
 
 class Command(BaseCommand):
-    help = 'Catálogo de materiales de instalación GPON y kits por tipo de trabajo (y stock de prueba con --inventario).'
+    help = 'Catálogo de materiales de instalación GPON y kits por tipo de trabajo (y stock inicial con --inventario).'
 
     def add_arguments(self, parser):
-        parser.add_argument('--inventario', action='store_true', help='Crear un lote de prueba con stock en cada almacén activo')
+        parser.add_argument('--inventario', action='store_true', help='Crear un lote de stock inicial en cada almacén activo')
 
     @transaction.atomic
     def handle(self, *args, **opts):
@@ -103,23 +103,23 @@ class Command(BaseCommand):
         if not (usuario and disponible and ingreso and estado_lote):
             self.stderr.write('Faltan catálogos de almacén (estado DISPONIBLE, tipo de ingreso NUEVO o estados de lote): no se creó stock.')
             return
-        proveedor = Proveedor.objects.filter(nombre_comercial='Proveedor de prueba').first() or \
-            Proveedor.objects.create(nombre_comercial='Proveedor de prueba', razon_social='DATOS DE PRUEBA')
+        proveedor = Proveedor.objects.filter(nombre_comercial='Distribuidora FTTH').first() or \
+            Proveedor.objects.create(nombre_comercial='Distribuidora FTTH', razon_social='Distribuidora FTTH')
         hoy = timezone.localdate()
         for almacen in Almacen.objects.filter(activo=True):
-            numero = f'PRUEBA-MAT-{almacen.codigo}'
+            numero = f'MAT-{almacen.codigo}-001'
             if Lote.objects.filter(numero_lote=numero).exists():
                 self.stdout.write(f'{almacen.nombre}: ya tiene el lote {numero}')
                 continue
             lote = Lote.objects.create(numero_lote=numero, tipo_ingreso=ingreso, proveedor=proveedor, almacen_destino=almacen,
                                        estado=estado_lote, fecha_recepcion=hoy, fecha_inicio_garantia=hoy, fecha_fin_garantia=hoy,
-                                       observaciones='DATOS DE PRUEBA: stock de materiales de instalación', created_by=usuario)
+                                       observaciones='Stock inicial de materiales de instalación', created_by=usuario)
             for _, _, _, nombre, _, stock in MATERIALES:
                 modelo = modelos[nombre]
                 LoteDetalle.objects.create(lote=lote, modelo=modelo, cantidad=stock)
                 m = Material(tipo_material=modelo.tipo_material, modelo=modelo, lote=lote, tipo_origen=ingreso,
                              codigo_item_equipo=str(modelo.codigo_modelo).zfill(6)[:10], almacen_actual=almacen,
-                             estado_general=disponible, cantidad=Decimal(stock), observaciones='DATOS DE PRUEBA')
+                             estado_general=disponible, cantidad=Decimal(stock))
                 m._usuario = usuario
                 m.save()
             self.stdout.write(f'{almacen.nombre}: lote {numero} con {len(MATERIALES)} materiales')

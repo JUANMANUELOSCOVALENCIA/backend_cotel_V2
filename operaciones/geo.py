@@ -113,3 +113,12 @@ def area_km2(geometria):
                 s += x1 * y2 - x2 * y1
             total += abs(s) / 2 * (1 if k == 0 else -1)
     return round(max(total, 0), 2)
+
+
+def distancia_m(lat1, lng1, lat2, lng2):
+    """Distancia en metros entre dos puntos (fórmula de Haversine, radio terrestre 6 371 km)."""
+    from math import asin, cos, radians, sin, sqrt
+    p1, p2 = radians(float(lat1)), radians(float(lat2))
+    dp, dl = p2 - p1, radians(float(lng2) - float(lng1))
+    a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return 2 * 6371000 * asin(sqrt(a))

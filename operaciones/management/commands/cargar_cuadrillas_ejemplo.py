@@ -1,13 +1,13 @@
 # ======================================================
 # python manage.py cargar_cuadrillas_ejemplo [--ordenes 10]
 #
-# Crea DATOS DE PRUEBA para cuadrillas y programación:
+# Crea datos de ejemplo para cuadrillas y programación (solo para desarrollo; dentro del sistema
+# no se distinguen de los demás datos, decisión del 22/10/2026):
 #   - 3 vehículos con su equipamiento fijo
-#   - técnicos de prueba (rol Técnico) hasta tener 7 habilitados para campo.
-#     Se identifican por el apellido materno PRUEBA; su contraseña inicial es su código COTEL
-#     (igual que los usuarios creados a mano) y deben cambiarla al entrar.
+#   - técnicos (rol Técnico) hasta tener 7 habilitados para campo. Su contraseña inicial es su
+#     código COTEL (igual que los usuarios creados a mano) y deben cambiarla al entrar.
 #   - hasta 3 cuadrillas activas (CUA-01…), cada una con vehículo, almacén, sus zonas y técnicos
-#   - con --ordenes N: N solicitudes de prueba (con su OT pendiente) dentro de las zonas de cobertura
+#   - con --ordenes N: N solicitudes (con su OT pendiente) dentro de las zonas de cobertura
 #
 # Se puede ejecutar varias veces: no duplica (vehículos por placa, cuadrillas hasta 3 activas)
 # y no modifica lo registrado a mano.
@@ -24,7 +24,6 @@ from operaciones.models import Cuadrilla, IntegranteCuadrilla, Solicitud, Vehicu
 from operaciones.serializers import crear_orden
 from usuarios.models import Roles, Usuario
 
-MARCA = 'DATOS DE PRUEBA'
 VEHICULOS = [
     ('2345ABC', 'Camioneta Toyota Hilux blanca'),
     ('3456BCD', 'Camioneta Nissan Frontier gris'),
@@ -32,10 +31,12 @@ VEHICULOS = [
 ]
 EQUIPAMIENTO = [('Escalera telescópica 8 m', 1), ('Empalmadora de fusión', 1), ('Medidor de potencia óptica', 1),
                 ('Cortadora de fibra (cleaver)', 1), ('Kit de herramientas', 1), ('Conos de seguridad', 4)]
-TECNICOS = [('Juan Carlos', 'Mamani'), ('Luis Alberto', 'Quispe'), ('Carlos', 'Choque'), ('Pedro', 'Condori'),
-            ('Mario', 'Flores'), ('Raúl', 'Apaza'), ('Edwin', 'Limachi'), ('Freddy', 'Huanca')]
-CLIENTES = [('Rosa', 'Ticona'), ('Jorge', 'Calle'), ('Carmen', 'Poma'), ('Miguel', 'Alanoca'), ('Lucía', 'Copa'),
-            ('Hugo', 'Nina'), ('Silvia', 'Ramos'), ('Diego', 'Cruz'), ('Paola', 'Villca'), ('Iván', 'Machaca')]
+TECNICOS = [('Juan Carlos', 'Mamani', 'Torrez'), ('Luis Alberto', 'Quispe', 'Gutiérrez'), ('Carlos', 'Choque', 'Laura'),
+            ('Pedro', 'Condori', 'Rojas'), ('Mario', 'Flores', 'Aruquipa'), ('Raúl', 'Apaza', 'Mendoza'),
+            ('Edwin', 'Limachi', 'Paco'), ('Freddy', 'Huanca', 'Callisaya')]
+CLIENTES = [('Rosa', 'Ticona Alanoca'), ('Jorge', 'Calle Chura'), ('Carmen', 'Poma Yujra'), ('Miguel', 'Alanoca Tarqui'),
+            ('Lucía', 'Copa Huarachi'), ('Hugo', 'Nina Sirpa'), ('Silvia', 'Ramos Ajata'), ('Diego', 'Cruz Colque'),
+            ('Paola', 'Villca Mamani'), ('Iván', 'Machaca Quispe')]
 CALLES = ['Av. 6 de Agosto', 'Calle Murillo', 'Av. Buenos Aires', 'Calle Landaeta', 'Av. Saavedra', 'Calle Potosí']
 REFERENCIAS = ['Casa de dos pisos, puerta café', 'Frente a la tienda de barrio', 'Edificio azul, 3er piso',
                'Portón negro junto a la farmacia', '']
@@ -58,10 +59,10 @@ def _punto_en(zona):
 
 
 class Command(BaseCommand):
-    help = 'Crea vehículos, técnicos y cuadrillas de prueba (y OT de prueba con --ordenes N).'
+    help = 'Crea vehículos, técnicos y cuadrillas de ejemplo (y OT con --ordenes N).'
 
     def add_arguments(self, parser):
-        parser.add_argument('--ordenes', type=int, default=0, help='Cantidad de solicitudes/OT de prueba a crear')
+        parser.add_argument('--ordenes', type=int, default=0, help='Cantidad de solicitudes/OT a crear')
 
     @transaction.atomic
     def handle(self, *args, **opts):
@@ -77,26 +78,26 @@ class Command(BaseCommand):
         # Vehículos
         vehiculos = []
         for placa, desc in VEHICULOS:
-            v, nuevo = Vehiculo.objects.get_or_create(placa=placa, defaults={'descripcion': desc, 'observaciones': MARCA})
+            v, nuevo = Vehiculo.objects.get_or_create(placa=placa, defaults={'descripcion': desc})
             if nuevo:
                 VehiculoEquipo.objects.bulk_create([VehiculoEquipo(vehiculo=v, nombre=n, cantidad=c) for n, c in EQUIPAMIENTO])
             vehiculos.append(v)
-        self.stdout.write(f'Vehículos de prueba: {len(vehiculos)}')
+        self.stdout.write(f'Vehículos: {len(vehiculos)}')
 
-        # Técnicos de prueba hasta tener 7 habilitados para campo
+        # Técnicos hasta tener 7 habilitados para campo
         creados = 0
-        for nombres, paterno in TECNICOS:
+        for nombres, paterno, materno in TECNICOS:
             if programacion.tecnicos_disponibles().count() + IntegranteCuadrilla.objects.filter(hasta__isnull=True).count() >= 7:
                 break
-            if Usuario.objects.filter(nombres=nombres, apellidopaterno=paterno, apellidomaterno='PRUEBA').exists():
+            if Usuario.objects.filter(nombres=nombres, apellidopaterno=paterno).exists():
                 continue
             codigo = Usuario.objects.generar_codigo_cotel_disponible()
-            u = Usuario(codigocotel=codigo, nombres=nombres, apellidopaterno=paterno, apellidomaterno='PRUEBA', rol=rol,
+            u = Usuario(codigocotel=codigo, nombres=nombres, apellidopaterno=paterno, apellidomaterno=materno, rol=rol,
                         password_changed=False)
             u.set_password(str(codigo))
             u.save()
             creados += 1
-        self.stdout.write(f'Técnicos de prueba creados: {creados} (contraseña inicial = su código COTEL)')
+        self.stdout.write(f'Técnicos creados: {creados} (contraseña inicial = su código COTEL)')
 
         # Hasta 3 cuadrillas activas
         nuevas = []
@@ -106,7 +107,7 @@ class Command(BaseCommand):
             if len(libres) < 2 or not vehiculo:
                 break
             almacen = almacenes[len(nuevas) % len(almacenes)]
-            c = Cuadrilla.objects.create(almacen=almacen, vehiculo=vehiculo, capacidad_diaria=5, observaciones=MARCA)
+            c = Cuadrilla.objects.create(almacen=almacen, vehiculo=vehiculo, capacidad_diaria=5)
             c.zonas.set(ZonaCobertura.objects.filter(activo=True, almacen=almacen))
             for i, t in enumerate(libres[:3 if len(nuevas) == 0 else 2]):
                 programacion.agregar_integrante(c, t, es_jefe=(i == 0))
@@ -116,7 +117,7 @@ class Command(BaseCommand):
             self.stdout.write(f'  {c.nombre} · {c.almacen.nombre} · {c.vehiculo.placa} · {gente}')
         self.stdout.write(f'Cuadrillas creadas: {len(nuevas)} (activas: {Cuadrilla.objects.filter(activo=True).count()})')
 
-        # OT de prueba
+        # OT
         if opts['ordenes']:
             self._ordenes(opts['ordenes'])
 
@@ -132,7 +133,7 @@ class Command(BaseCommand):
         zonas = [(z, _punto_en(z)) for z in ZonaCobertura.objects.filter(activo=True)]
         zonas = [(z, p) for z, p in zonas if p]
         if not zonas:
-            self.stderr.write('No hay zonas de cobertura activas con polígono: no se crearon OT de prueba.')
+            self.stderr.write('No hay zonas de cobertura activas con polígono: no se crearon OT.')
             return
         plan = PlanComercial.objects.filter(activo=True).exclude(codigo_plan='TEL-FIJA').order_by('precio_mensual').first()
         admin = Usuario.objects.filter(is_superuser=True).order_by('id').first()
@@ -142,8 +143,7 @@ class Command(BaseCommand):
             nombres, apellido = CLIENTES[i % len(CLIENTES)]
             ci = f'{9900000 + i}'
             cliente, _ = Cliente.objects.get_or_create(ci=ci, defaults={
-                'nombres': nombres, 'apellidos': f'{apellido} (prueba)', 'telefono': f'7{rnd.randint(1000000, 9999999)}',
-                'observaciones': MARCA})
+                'nombres': nombres, 'apellidos': apellido, 'telefono': f'7{rnd.randint(1000000, 9999999)}'})
             if Solicitud.objects.filter(cliente=cliente, estado=Solicitud.Estado.EN_CURSO).exists():
                 continue
             zona, (lat, lng) = zonas[i % len(zonas)]
@@ -153,8 +153,8 @@ class Command(BaseCommand):
                 prioridad='ALTA' if i % 5 == 0 else 'NORMAL', telefono_contacto=cliente.telefono,
                 direccion=f'{rnd.choice(CALLES)} #{rnd.randint(100, 2500)}', zona_referencia=zona.nombre,
                 referencia=rnd.choice(REFERENCIAS), latitud=lat, longitud=lng, zona_cobertura=zona,
-                observaciones=MARCA, creado_por=admin,
+                creado_por=admin,
             )
             crear_orden(s, admin)
             creadas += 1
-        self.stdout.write(f'Solicitudes de prueba con su OT pendiente: {creadas}')
+        self.stdout.write(f'Solicitudes con su OT pendiente: {creadas}')

@@ -1,10 +1,13 @@
 # Pruebas de cuadrillas y programación de OT.
 #   python manage.py test operaciones
 # (el usuario de la base necesita permiso para crear la base de pruebas: ALTER USER ... CREATEDB)
+import io
+import tempfile
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -258,9 +261,8 @@ class ApiTests(Base):
         self.assertTrue(HistorialOT.objects.filter(orden=ot, observacion__startswith='Ubicación corregida').exists())
 
 
-class DespachoTests(Base):
-    """Despacho: ONU a cargo de la cuadrilla (sin atarse a una OT) y material; rendición con instalación por OT,
-    consumo por OT, devoluciones, faltantes y equipos recuperados de clientes."""
+class DatosDespacho(Base):
+    """Datos comunes: ONU básica y completa, material drop, una cuadrilla con dos instalaciones (internet y TV)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -315,6 +317,12 @@ class DespachoTests(Base):
 
     def ejecutar(self, *ots):
         OrdenTrabajo.objects.filter(pk__in=[o.pk for o in ots]).update(estado=E.EJECUTADA)
+
+
+
+class DespachoTests(DatosDespacho):
+    """Despacho: ONU a cargo de la cuadrilla (sin atarse a una OT) y material; rendición con instalación por OT,
+    consumo por OT, devoluciones, faltantes y equipos recuperados de clientes."""
 
     def test_servicios_del_modelo(self):
         self.assertEqual((self.m_basica.soporta_tv, self.m_basica.soporta_telefonia), (False, False))
@@ -489,3 +497,147 @@ class PlazoAttTests(Base):
         tarde = self._ot('INSTALACION', td(days=10))
         tarde.cambiar_estado(E.EJECUTADA, self.oficina, 'prueba')
         self.assertEqual(plazos.plazo(tarde)['estado'], 'INCUMPLIDO')
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='evid_'))
+class CampoTests(DatosDespacho):
+    """App de campo: iniciar con GPS, fotos con Haversine / SHA-256 / pHash, ejecutar con ONU a cargo y material."""
+    LAT, LNG = '-16.500000', '-68.100000'   # domicilio de las solicitudes de prueba
+
+    def setUp(self):
+        super().setUp()
+        self.tec = self.tecnicos[0]          # jefe de C1
+        OrdenTrabajo.objects.filter(pk__in=[self.ot_internet.pk, self.ot_tv.pk]).update(fecha_programada=HOY)
+        self.des, _ = desp.despachar(self.c, HOY, [self.basicas[0].id, self.completas[0].id], [(self.drop.id, '160')], self.oficina)
+        self.api = APIClient()
+        self.api.force_authenticate(self.tec)
+
+    @staticmethod
+    def foto(semilla=1, brillo=0):
+        import random
+        from PIL import Image
+        rnd = random.Random(semilla)
+        img = Image.new('RGB', (64, 64))
+        img.putdata([tuple(min(255, rnd.randint(0, 255) + brillo) for _ in range(3)) for _ in range(64 * 64)])
+        b = io.BytesIO()
+        img.save(b, 'PNG')
+        return SimpleUploadedFile(f'onu{semilla}.png', b.getvalue(), content_type='image/png')
+
+    def _foto(self, ot, semilla=1, lat=None, brillo=0):
+        return self.api.post(f'/api/operaciones/campo/{ot.id}/evidencia/',
+                             {'imagen': self.foto(semilla, brillo), 'lat': lat or self.LAT, 'lng': self.LNG, 'tipo': 'ONU'},
+                             format='multipart')
+
+    def test_flujo_completo(self):
+        r = self.api.get('/api/operaciones/campo/mis-trabajos/')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(len(r.data['ordenes']), 2)
+        self.assertEqual(len(r.data['onus']), 2)
+        ot = self.ot_tv
+        # Foto antes de llegar: no
+        self.assertEqual(self._foto(ot).status_code, 400)
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/iniciar/', {'lat': self.LAT, 'lng': self.LNG}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['orden']['estado']['codigo'], 'EN_CAMPO')
+        # Lejos del domicilio (≈1,1 km): rechazada
+        r = self._foto(ot, lat='-16.510000')
+        self.assertEqual(r.data['evidencia']['estado']['codigo'], 'RECHAZADA')
+        self.assertIn('m del domicilio', r.data['evidencia']['motivo'])
+        # Válida
+        r = self._foto(ot, semilla=1)
+        self.assertEqual(r.data['evidencia']['estado']['codigo'], 'ACEPTADA')
+        # Misma foto o casi igual (más brillo): rechazadas
+        self.assertIn('misma foto', self._foto(ot, semilla=1).data['evidencia']['motivo'])
+        self.assertIn('casi igual', self._foto(ot, semilla=1, brillo=8).data['evidencia']['motivo'])
+        # Ejecutar: la ONU básica no sirve para TV; la completa sí
+        onus = {e.material_id: e.id for e in self.des.equipos.all()}
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/ejecutar/', {'onu': onus[self.basicas[0].id]}, format='json')
+        self.assertIn('servicios del plan', r.data['error'])
+        linea = self.des.materiales.get()
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/ejecutar/',
+                          {'onu': onus[self.completas[0].id], 'materiales': [{'id': linea.id, 'cantidad': 200}]}, format='json')
+        self.assertIn('te quedan 160', r.data['error'])
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/ejecutar/',
+                          {'onu': onus[self.completas[0].id], 'materiales': [{'id': linea.id, 'cantidad': 75}],
+                           'observaciones': 'Potencia -19 dBm'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        ot.refresh_from_db()
+        self.assertEqual(ot.estado, E.EJECUTADA)
+        self.assertEqual(ot.reporte_campo.despacho_equipo.material_id, self.completas[0].id)
+        # La ONU reportada ya no está disponible para otra OT; quedan 85 m de drop
+        r = self.api.get('/api/operaciones/campo/mis-trabajos/')
+        self.assertEqual([o['id'] for o in r.data['onus']], [onus[self.basicas[0].id]])
+        self.assertEqual(r.data['materiales'][0]['disponible'], 85.0)
+        # La oficina ve las fotos y el reporte en el detalle de la OT
+        oficina = APIClient()
+        oficina.force_authenticate(self.oficina)
+        d = oficina.get(f'/api/operaciones/ordenes/{ot.id}/').data
+        self.assertEqual(len(d['evidencias']), 4)
+        self.assertEqual(d['reporte_campo']['materiales'][0]['cantidad'], '75')
+        foto = d['evidencias'][1]['id']
+        self.assertEqual(oficina.get(f'/api/operaciones/ordenes/{ot.id}/foto/{foto}/').status_code, 200)
+
+    def test_instalacion_exige_foto_y_onu(self):
+        ot = self.ot_internet
+        self.api.post(f'/api/operaciones/campo/{ot.id}/iniciar/', {'lat': self.LAT, 'lng': self.LNG}, format='json')
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/ejecutar/', {}, format='json')
+        self.assertIn('foto de la ONU', r.data['error'])
+        self._foto(ot, semilla=7)
+        r = self.api.post(f'/api/operaciones/campo/{ot.id}/ejecutar/', {}, format='json')
+        self.assertIn('qué ONU', r.data['error'])
+
+    def test_no_se_pudo_y_solo_su_cuadrilla(self):
+        r = self.api.post(f'/api/operaciones/campo/{self.ot_internet.id}/no-se-pudo/', {'motivo': 'CLIENTE_AUSENTE'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.ot_internet.refresh_from_db()
+        self.assertEqual(self.ot_internet.estado, E.NO_EJECUTADA)
+        self.assertIn('Cliente ausente', self.ot_internet.historial.last().observacion)
+        otro = APIClient()
+        otro.force_authenticate(self.tecnicos[4])   # sin cuadrilla
+        r = otro.post(f'/api/operaciones/campo/{self.ot_tv.id}/iniciar/', {'lat': self.LAT, 'lng': self.LNG}, format='json')
+        self.assertIn('ninguna cuadrilla', r.data['error'])
+        self.assertEqual(APIClient().get('/api/operaciones/campo/mis-trabajos/').status_code, 401)
+
+
+class EoqTests(DatosDespacho):
+    """EOQ con el consumo real registrado; si no hay consumo usa la D estimada (datos de ejemplo de la tesis)."""
+
+    def test_sin_consumo_usa_demanda_estimada(self):
+        from . import inventario
+        fila = next(f for f in inventario.calcular()['filas'] if f['modelo']['id'] == self.m_basica.id)
+        self.assertEqual((fila['fuente'], fila['demanda_anual']), ('ESTIMADA', 700.0))
+        self.assertEqual(fila['eoq'], 163)          # √(2·700·850/45) = 162,6
+        self.assertEqual(fila['rop'], 29)           # 700/365·15 = 28,8
+        self.assertTrue(fila['pedir'])              # hay 2 en stock
+
+    def test_con_consumo_real_y_api(self):
+        d, _ = desp.despachar(self.c, MANANA, [self.basicas[0].id, self.completas[0].id], [(self.drop.id, '200')], self.oficina)
+        Despacho.objects.filter(pk=d.pk).update(fecha=HOY)
+        OrdenTrabajo.objects.filter(pk__in=[self.ot_internet.pk, self.ot_tv.pk]).update(fecha_programada=HOY)
+        self.ejecutar(self.ot_internet, self.ot_tv)
+        d.refresh_from_db()
+        eq = {e.material_id: e.id for e in d.equipos.all()}
+        linea = d.materiales.get()
+        desp.rendir(d, {eq[self.basicas[0].id]: ('INSTALADO', self.ot_internet.id), eq[self.completas[0].id]: ('INSTALADO', self.ot_tv.id)},
+                    {linea.id: {self.ot_internet.id: '80', self.ot_tv.id: '90'}}, {linea.id: '30'}, [], self.oficina)
+        api = APIClient()
+        api.force_authenticate(self.oficina)
+        r = api.get('/api/operaciones/inventario/eoq/')
+        self.assertEqual(r.status_code, 200, r.data)
+        fila = next(f for f in r.data['filas'] if f['modelo']['id'] == self.m_basica.id)
+        self.assertEqual((fila['fuente'], fila['consumo_periodo'], fila['dias_periodo']), ('CONSUMO', 1.0, 7))
+        self.assertAlmostEqual(fila['demanda_anual'], 52.1, places=1)   # 1 ONU en 7 días → 52 al año
+        self.assertIn('filas', r.data, r.data)
+        drop = next(f for f in r.data['filas'] if f['modelo']['nombre'] == 'Drop 1 hilo')
+        self.assertEqual(drop['consumo_periodo'], 170.0)
+        self.assertIsNone(drop['eoq'])                                  # material sin parámetros propios
+        self.assertEqual(api.post('/api/operaciones/inventario/parametros/', {'S': 1, 'H': 1, 'L': 1}, format='json').status_code, 403)
+        perm, _ = Permission.objects.get_or_create(recurso='materiales', accion='actualizar')
+        self.rol_oficina.permisos.add(perm)
+        r = api.post('/api/operaciones/inventario/parametros/', {'modelo': drop['modelo']['id'], 'S': 300, 'H': 2, 'L': 10}, format='json')
+        self.assertIn('filas', r.data, r.data)
+        drop = next(f for f in r.data['filas'] if f['modelo']['nombre'] == 'Drop 1 hilo')
+        self.assertIsNotNone(drop['eoq'])
+        r = api.get('/api/operaciones/ordenes/indicadores/')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['por_estado']['EJECUTADA'], 2)

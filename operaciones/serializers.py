@@ -279,12 +279,42 @@ class OrdenListSerializer(serializers.ModelSerializer):
         return p and {**p, 'limite': p['limite'].isoformat()}
 
 
+def _evidencia(e):
+    """Foto de la app de campo (sin la imagen: se pide aparte)."""
+    from .models import EvidenciaOT
+    return {'id': e.id, 'tipo': _opcion(EvidenciaOT.Tipo.choices, e.tipo), 'estado': _opcion(EvidenciaOT.Estado.choices, e.estado),
+            'motivo': e.motivo, 'cnn': _opcion(EvidenciaOT.Cnn.choices, e.cnn), 'cnn_confianza': e.cnn_confianza,
+            'distancia_m': e.distancia_m, 'fecha': e.created_at,
+            'tomada_por': e.tomada_por.nombre_completo if e.tomada_por_id else ''}
+
+
 class OrdenDetailSerializer(OrdenListSerializer):
     historial = HistorialOTSerializer(many=True, read_only=True)
+    evidencias = serializers.SerializerMethodField()
+    reporte_campo = serializers.SerializerMethodField()
     ubicacion = serializers.SerializerMethodField()
 
     class Meta(OrdenListSerializer.Meta):
-        fields = OrdenListSerializer.Meta.fields + ['observaciones', 'historial', 'ubicacion']
+        fields = OrdenListSerializer.Meta.fields + ['observaciones', 'historial', 'ubicacion', 'evidencias', 'reporte_campo']
+
+    def get_evidencias(self, obj):
+        return [_evidencia(e) for e in obj.evidencias.select_related('tomada_por')]
+
+    def get_reporte_campo(self, obj):
+        """Lo que informó el técnico al ejecutar (ONU instalada, material, equipo recuperado)."""
+        r = getattr(obj, 'reporte_campo', None)
+        if not r:
+            return None
+        from .models import DespachoMaterial
+        lineas = {m.id: m for m in DespachoMaterial.objects.filter(pk__in=[x['despacho_material'] for x in r.materiales])
+                  .select_related('material__modelo__unidad_medida')}
+        return {'onu': _onu(r.despacho_equipo.material) if r.despacho_equipo_id else None,
+                'materiales': [{'nombre': lineas[x['despacho_material']].material.modelo.nombre if x['despacho_material'] in lineas else '',
+                                'unidad': (lineas[x['despacho_material']].material.modelo.unidad_medida.simbolo
+                                           if x['despacho_material'] in lineas and lineas[x['despacho_material']].material.modelo.unidad_medida_id else ''),
+                                'cantidad': x['cantidad']} for x in r.materiales],
+                'serial_recuperado': r.serial_recuperado, 'observaciones': r.observaciones,
+                'usuario': r.usuario.nombre_completo, 'fecha': r.created_at}
 
     def get_ubicacion(self, obj):
         s = obj.solicitud
@@ -792,7 +822,16 @@ class DespachoSerializer(serializers.Serializer):
         if not self.context.get('con_ordenes'):
             return None
         from .despacho import ordenes_del_dia
-        return [_ot_corta(o) for o in ordenes_del_dia(obj.cuadrilla, obj.fecha)]
+        from .models import ReporteCampo
+        ots = list(ordenes_del_dia(obj.cuadrilla, obj.fecha))
+        # Lo que informó el técnico desde la app (prellena la rendición)
+        reportes = {r.orden_id: r for r in ReporteCampo.objects.filter(orden__in=ots)}
+
+        def reporte(o):
+            r = reportes.get(o.id)
+            return r and {'equipo': r.despacho_equipo_id, 'serial_recuperado': r.serial_recuperado,
+                          'materiales': {str(m['despacho_material']): m['cantidad'] for m in r.materiales}}
+        return [{**_ot_corta(o), 'reporte': reporte(o)} for o in ots]
 
 
 class KitMaterialSerializer(serializers.ModelSerializer):

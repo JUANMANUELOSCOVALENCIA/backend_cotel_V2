@@ -520,3 +520,93 @@ class KitMaterial(models.Model):
         db_table = 'operaciones_kit_material'
         ordering = ['tipo', 'condicion', 'id']
         constraints = [models.UniqueConstraint(fields=['tipo', 'condicion', 'modelo'], name='uq_kit_material')]
+
+
+# ---------------- App de campo: evidencias y reporte del técnico ----------------
+
+def _ruta_evidencia(instance, filename):
+    ext = (filename.rsplit('.', 1)[-1] if '.' in filename else 'jpg').lower()[:5]
+    return f'evidencias/{timezone.localdate():%Y/%m}/{instance.orden.numero}-{instance.sha256[:12]}.{ext}'
+
+
+class EvidenciaOT(models.Model):
+    """
+    Foto tomada por el técnico desde la app (cámara en vivo, sin galería). Se guarda con la hora
+    del SERVIDOR, el GPS del teléfono, SHA-256 (integridad del archivo) y pHash (para detectar fotos
+    iguales o casi iguales). Las rechazadas también se guardan: son el registro de los intentos.
+    """
+    class Tipo(models.TextChoices):
+        ONU = 'ONU', 'Foto de la ONU'
+        ADICIONAL = 'ADICIONAL', 'Foto adicional'
+
+    class Estado(models.TextChoices):
+        ACEPTADA = 'ACEPTADA', 'Aceptada'
+        RECHAZADA = 'RECHAZADA', 'Rechazada'
+        OBSERVADA = 'OBSERVADA', 'Observada'
+
+    class Cnn(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        DETECTADA = 'DETECTADA', 'ONU detectada'
+        NO_DETECTADA = 'NO_DETECTADA', 'ONU no detectada'
+        NO_APLICA = 'NO_APLICA', 'No aplica'
+
+    orden = models.ForeignKey(OrdenTrabajo, on_delete=models.PROTECT, related_name='evidencias')
+    tipo = models.CharField(max_length=10, choices=Tipo.choices, default=Tipo.ONU)
+    imagen = models.FileField(upload_to=_ruta_evidencia)
+    sha256 = models.CharField(max_length=64, db_index=True)
+    phash = models.CharField(max_length=16, help_text='Hash perceptual (64 bits en hexadecimal)')
+    latitud = models.DecimalField(max_digits=9, decimal_places=6)
+    longitud = models.DecimalField(max_digits=9, decimal_places=6)
+    precision_m = models.FloatField(null=True, blank=True, help_text='Precisión del GPS informada por el teléfono')
+    distancia_m = models.FloatField(help_text='Distancia (Haversine) al domicilio de la solicitud')
+    estado = models.CharField(max_length=10, choices=Estado.choices)
+    motivo = models.CharField(max_length=200, blank=True, help_text='Por qué se rechazó u observó')
+    cnn = models.CharField(max_length=12, choices=Cnn.choices, default=Cnn.PENDIENTE)
+    cnn_confianza = models.FloatField(null=True, blank=True)
+    tomada_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'operaciones_evidencia_ot'
+        ordering = ['created_at', 'id']
+
+
+class ReporteCampo(models.Model):
+    """
+    Lo que informa el técnico al marcar la OT como ejecutada: la ONU que instaló (de las que la
+    cuadrilla tiene a cargo), el material usado y el equipo recuperado. Prellena la rendición.
+    """
+    orden = models.OneToOneField(OrdenTrabajo, on_delete=models.CASCADE, related_name='reporte_campo')
+    despacho_equipo = models.ForeignKey(DespachoEquipo, on_delete=models.SET_NULL, null=True, blank=True, related_name='reportes',
+                                        help_text='ONU instalada')
+    materiales = models.JSONField(default=list, blank=True, help_text='[{"despacho_material": id, "cantidad": "12.5"}]')
+    serial_recuperado = models.CharField(max_length=100, blank=True, help_text='Equipo retirado del cliente (retiro o cambio)')
+    observaciones = models.TextField(blank=True)
+    latitud = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitud = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'operaciones_reporte_campo'
+
+
+# ---------------- Inventario: parámetros del modelo EOQ ----------------
+
+class ParametroEOQ(models.Model):
+    """
+    Costos y tiempos para el modelo EOQ y el punto de reorden.
+    `modelo` vacío = valores por defecto para las ONU (datos de ejemplo de la tesis, editables).
+    La demanda D se calcula del consumo registrado; `demanda_estimada` se usa solo si aún no hay consumo.
+    """
+    modelo = models.OneToOneField('almacenes.Modelo', on_delete=models.CASCADE, null=True, blank=True, related_name='parametro_eoq')
+    costo_pedido = models.DecimalField(max_digits=10, decimal_places=2, help_text='S: costo de hacer un pedido (Bs)')
+    costo_mantener = models.DecimalField(max_digits=10, decimal_places=2, help_text='H: costo de mantener una unidad un año (Bs)')
+    tiempo_entrega = models.PositiveSmallIntegerField(help_text='L: días que tarda el proveedor')
+    demanda_estimada = models.PositiveIntegerField(null=True, blank=True, help_text='D estimada (unidades/año) si no hay consumo')
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        db_table = 'operaciones_parametro_eoq'
+        constraints = [models.UniqueConstraint(fields=['modelo'], condition=Q(modelo__isnull=True), name='uq_parametro_eoq_defecto')]
